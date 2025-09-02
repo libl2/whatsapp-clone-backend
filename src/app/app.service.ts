@@ -8,10 +8,11 @@ export class AppService {
   constructor(private readonly waService: WhatsAppService) {}
 
   init() {
+    this._logger.log('Calling waService.initClient()');
     this.waService
       .initClient()
       .catch((err) => {
-        this._logger.error(err.message);
+        this._logger.error('initClient error: ' + err.message);
       })
       .then(() => {
         this._logger.log('Client released');
@@ -71,5 +72,12 @@ export class AppService {
     } catch (err) {
       return undefined;
     }
+  }
+
+  getStatus() {
+    return {
+      whatsapp: this.waService.status,
+      // אפשר להוסיף כאן סטטוסים נוספים אם תרצה
+    };
   }
 }

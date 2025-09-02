@@ -18,6 +18,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection {
 
   handleConnection(socket: any): any {
     this._logger.log(`Socket connection: ${socket.id}`);
+    this._logger.log(`Total sessions: ${this.socketService.sessions.length + 1}`);
     socket.on('disconnect', () => this.disconnect(socket));
     this.socketService.sessions.push(socket);
     // TODO: send to redis that user is online
@@ -26,6 +27,7 @@ export class SocketGateway implements OnGatewayInit, OnGatewayConnection {
   disconnect(socket: any) {
     this._logger.log(`Socket disconnection: ${socket.id}`);
     this.socketService.sessions = this.socketService.sessions.filter(s => s !== socket);
+    this._logger.log(`Total sessions: ${this.socketService.sessions.length}`);
   }
 
   // @SubscribeMessage('START-CONVERSATION')

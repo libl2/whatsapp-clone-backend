@@ -39,4 +39,9 @@ export class AppController {
   sendMessage(@Param('id') id: string, @Body() model: any) {
     return this.appService.sendMessage(id, model);
   }
+
+  @Get('status')
+  getStatus() {
+    return this.appService.getStatus();
+  }
 }

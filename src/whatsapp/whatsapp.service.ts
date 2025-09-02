@@ -8,6 +8,7 @@ export class WhatsAppService {
   client: Client;
   private _logger = new ConsoleLogger('WAService');
   private _qrCode = '';
+  status: string = 'initializing';
 
   constructor(private readonly socketService: SocketService) {}
 
@@ -21,14 +22,22 @@ export class WhatsAppService {
       authStrategy: new LocalAuth({
         dataPath: './data/auth',
       }),
+      puppeteer: {
+        headless: false,
+        executablePath: "C:/Program Files/Google/Chrome/Application/chrome.exe",
+        args: [
+          '--no-sandbox',
+        ],
+      },
     });
 
-    this.client.on('qr', this.onQR);
-    this.client.on('ready', this.onReady);
+    this.client.on('qr', (...args) => { this._logger.log('EVENT: qr'); this.onQR(...args); });
+    this.client.on('ready', (...args) => { this._logger.log('EVENT: ready'); this.onReady(...args); });
+    this.client.on('authenticated', () => { this._logger.log('EVENT: authenticated'); this.onAuthenticated(); });
+    this.client.on('auth_failure', (...args) => { this._logger.log('EVENT: auth_failure'); this.onAuthFailure(...args); });
+    this.client.on('disconnected', (...args) => { this._logger.log('EVENT: disconnected'); this.onDisconnected(...args); });
     this.client.on('message', this.onMessage);
     this.client.on('loading_screen', this.onLoadingScreen);
-    this.client.on('authenticated', this.onAuthenticated);
-    this.client.on('auth_failure', this.onAuthFailure);
     this.client.on('message_create', this.onMessageCreate);
     this.client.on('message_revoke_everyone', this.onMessageRevokeEveryone);
     this.client.on('message_revoke_me', this.onMessageRevokeMe);
@@ -38,27 +47,30 @@ export class WhatsAppService {
     this.client.on('group_update', this.onGroupUpdate);
     this.client.on('group_admin_changed', this.onGroupAdminChanged);
     this.client.on('change_state', this.onStateChanged);
-    this.client.on('disconnected', this.onDisconnected);
     this.client.on('contact_changed', this.onContactChanged);
     const promise = this.client.initialize();
     this._logger.log('Client init done');
     return promise;
   }
   private onQR = async (qr: string) => {
+    this.status = 'qr';
     this._qrCode = await toDataURL(qr);
     this.socketService.send('qr', { qr: this._qrCode });
     this._logger.log('QR code sent to client');
   };
   private onReady = () => {
+    this.status = 'ready';
     this._qrCode = '';
     this.socketService.send('ready');
     this._logger.log('Client is ready');
   };
   private onAuthenticated = () => {
+    this.status = 'authenticated';
     this.socketService.send('authenticated');
     this._logger.log('Client is authenticated');
   };
   private onAuthFailure = (msg) => {
+    this.status = 'auth_failure';
     this.socketService.send('authentication_failed');
     this._logger.log('Client is authentication failed', msg);
   };
@@ -98,6 +110,7 @@ export class WhatsAppService {
     this._logger.log('onStateChanged', state);
   };
   private onDisconnected = (reason) => {
+    this.status = 'disconnected';
     this._logger.log('onDisconnected', reason);
   };
   private onContactChanged = (message, oldId, newId, isContact) => {
