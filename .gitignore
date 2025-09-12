@@ -4,6 +4,8 @@
 /.wwebjs_auth
 /data
 /db/data
+/.wwebjs_cache
+/media
 # Logs
 logs
 *.log
