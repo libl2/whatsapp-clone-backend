@@ -1,16 +1,20 @@
+// C:\Users\user\Documents\wa-web\WhatsppWeb-React\whatsapp-clone-backend\src\app\app.service.ts
 import { ConsoleLogger, Injectable } from '@nestjs/common';
 import { WhatsAppService } from '../whatsapp/whatsapp.service';
 import WAWebJS from 'whatsapp-web.js';
 import * as fs from 'fs';
 import * as path from 'path';
+import { SocketService } from 'src/socket/socket.service'; // וודא שאתה מייבא את SocketService
 
 @Injectable()
 export class AppService {
   private _logger = new ConsoleLogger('AppService');
-  private readonly MEDIA_SAVE_PATH = path.join(__dirname, '..', '..', 'media'); // נשמור תיקיית מדיה ב-root של ה-backend
+  private readonly MEDIA_SAVE_PATH = path.join(__dirname, '..', '..', 'media'); 
 
-  constructor(private readonly waService: WhatsAppService) {
-    // ודא שתיקיית המדיה קיימת
+  constructor(
+    private readonly waService: WhatsAppService,
+    private readonly socketService: SocketService // הזרקת SocketService
+  ) {
     if (!fs.existsSync(this.MEDIA_SAVE_PATH)) {
       fs.mkdirSync(this.MEDIA_SAVE_PATH, { recursive: true });
     }
@@ -53,16 +57,30 @@ export class AppService {
       const chat = await this.waService.client.getChatById(id);
       const messages = await chat.fetchMessages(model);
 
-      // לולאה על כל ההודעות כדי לבדוק ולטפל במדיה
-      for (const message of messages) {
+      // עבור כל הודעה, נטפל במדיה באופן אסינכרוני
+      // ונחזיר את המידע הבסיסי של ההודעה מיד.
+      const processedMessages = messages.map(message => {
         if (message.hasMedia) {
-          await this.downloadMedia(message);
+          // נפעיל את ההורדה ברקע, לא נחכה לה
+          this.downloadMediaAsync(message);
+          
+          // נוסיף לאובייקט ההודעה מידע שימושי ל-frontend
+          // ה-frontend ישתמש ב-mimetype כדי לדעת מה להציג (תמונה/וידאו/קובץ)
+          // ואת isDownloaded כדי לדעת אם הקובץ כבר קיים אצלנו
+          const mediaInfo = {
+            mimetype: message.mimetype,
+            filename: message.filename,
+            isDownloaded: this.checkIfMediaExistsLocally(message) // בדיקה מהירה אם הקובץ קיים
+          };
+          // נחזיר אובייקט הודעה עם מידע על המדיה
+          return { ...message, _mediaInfo: mediaInfo } as any; 
         }
-      }
+        return message;
+      });
 
-      return messages;
+      return processedMessages;
     } catch (err) {
-      this._logger.error(`Error fetching messages or downloading media for chat ${id}: ${err.message}`);
+      this._logger.error(`Error fetching messages for chat ${id}: ${err.message}`);
       return [];
     }
   }
@@ -75,15 +93,22 @@ export class AppService {
         limit: model.limit,
       });
 
-      for (const message of messages) {
+      const processedMessages = messages.map(message => {
         if (message.hasMedia) {
-          await this.downloadMedia(message);
+          this.downloadMediaAsync(message);
+          const mediaInfo = {
+            mimetype: message.mimetype,
+            filename: message.filename,
+            isDownloaded: this.checkIfMediaExistsLocally(message)
+          };
+          return { ...message, _mediaInfo: mediaInfo } as any;
         }
-      }
+        return message;
+      });
 
-      return messages;
+      return processedMessages;
     } catch (err) {
-      this._logger.error(`Error searching messages or downloading media: ${err.message}`);
+      this._logger.error(`Error searching messages: ${err.message}`);
       return [];
     }
   }
@@ -110,37 +135,81 @@ export class AppService {
 
   /**
    * מוריד מדיה מהודעה ושומר אותה בתיקייה ייעודית לצ'אט.
+   * פונקציה זו רצה באופן אסינכרוני.
    * @param message ההודעה המכילה מדיה.
    */
-  private async downloadMedia(message: WAWebJS.Message) {
-    try {
-      const media = await message.downloadMedia();
-      if (media) {
-        // יצירת שם קובץ ייחודי (לדוגמה: timestamp_messageId.extension)
-        const filename = `${message.timestamp}_${message.id.id}.${media.mimetype.split('/')[1]}`;
-        
-        // יצירת שם תיקייה עבור הצ'אט (מנקים תווים לא חוקיים)
-        const chatName = message.from.replace(/[^a-zA-Z0-9]/g, '_'); 
-        const chatFolderPath = path.join(this.MEDIA_SAVE_PATH, chatName);
-
-        // ודא שתיקיית הצ'אט קיימת
-        if (!fs.existsSync(chatFolderPath)) {
-          fs.mkdirSync(chatFolderPath, { recursive: true });
-        }
-
-        const filePath = path.join(chatFolderPath, filename);
-
-        // שמירת הקובץ
-        fs.writeFileSync(filePath, Buffer.from(media.data, 'base64'));
-        this._logger.log(`Media downloaded: ${filePath}`);
-
-        // ניתן להוסיף כאן לוגיקה לעדכון האובייקט message עם הנתיב המקומי של המדיה
-        // כך שה-frontend יוכל להשתמש בו. לדוגמה:
-        // (message as any).localMediaUrl = `/media/${chatName}/${filename}`; 
-        // שימו לב: זה ידרוש הגדרה של serve-static ב-NestJS כדי שהקבצים יהיו נגישים.
+  private async downloadMediaAsync(message: WAWebJS.Message) {
+    // נשתמש ב-setImmediate כדי לוודא שהפונקציה רצה ברקע ואינה חוסמת את התהליך הראשי
+    setImmediate(async () => {
+      if (!message.hasMedia) {
+        return;
       }
-    } catch (err) {
-      this._logger.error(`Failed to download media for message ${message.id.id}: ${err.message}`);
+
+      // בדוק אם הקובץ כבר ירד כדי למנוע הורדות מיותרות
+      if (this.checkIfMediaExistsLocally(message)) {
+        this._logger.log(`Media for message ${message.id.id} already exists locally. Skipping download.`);
+        return;
+      }
+
+      try {
+        this._logger.log(`Attempting to download media for message ${message.id.id}`);
+        const media = await message.downloadMedia();
+        if (media) {
+          const fileExtension = media.mimetype.split('/')[1] || 'bin'; // סיומת ברירת מחדל
+          const filename = `${message.timestamp}_${message.id.id}.${fileExtension}`;
+          
+          const chatName = this.getChatFolderName(message.from); // פונקציה לייצור שם תיקייה
+          const chatFolderPath = path.join(this.MEDIA_SAVE_PATH, chatName);
+
+          if (!fs.existsSync(chatFolderPath)) {
+            fs.mkdirSync(chatFolderPath, { recursive: true });
+          }
+
+          const filePath = path.join(chatFolderPath, filename);
+
+          fs.writeFileSync(filePath, Buffer.from(media.data, 'base64'));
+          this._logger.log(`Media downloaded: ${filePath}`);
+
+          // לאחר שהמדיה ירדה, נשלח עדכון ל-frontend דרך WebSocket
+          const localMediaUrl = `/media/${chatName}/${filename}`; // הנתיב הנגיש מה-frontend
+          this.socketService.send('media_downloaded', {
+            messageId: message.id.id,
+            chatId: message.from, // או message.to, תלוי בצורך
+            localMediaUrl: localMediaUrl,
+            mimetype: media.mimetype,
+            filename: filename,
+          });
+        } else {
+            this._logger.warn(`No media data received for message ${message.id.id}`);
+        }
+      } catch (err) {
+        this._logger.error(`Failed to download media for message ${message.id.id}: ${err.message}`);
+      }
+    });
+  }
+
+  /**
+   * בודק אם קובץ מדיה עבור הודעה מסוימת כבר קיים מקומית.
+   * @param message ההודעה לבדיקה.
+   * @returns true אם הקובץ קיים, false אחרת.
+   */
+  private checkIfMediaExistsLocally(message: WAWebJS.Message): boolean {
+    if (!message.hasMedia || !message.mimetype) { // נוודא שיש mimetype לפני שממשיכים
+      return false;
     }
+    const fileExtension = message.mimetype.split('/')[1] || 'bin';
+    const filename = `${message.timestamp}_${message.id.id}.${fileExtension}`;
+    const chatName = this.getChatFolderName(message.from);
+    const filePath = path.join(this.MEDIA_SAVE_PATH, chatName, filename);
+    return fs.existsSync(filePath);
+  }
+
+  /**
+   * מייצר שם תיקייה בטוח מזהה הצ'אט.
+   * @param chatId מזהה הצ'אט.
+   * @returns שם תיקייה בטוח.
+   */
+  private getChatFolderName(chatId: string): string {
+    return chatId.replace(/[^a-zA-Z0-9]/g, '_');
   }
 }

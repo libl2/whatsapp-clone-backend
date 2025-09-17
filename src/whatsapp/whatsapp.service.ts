@@ -1,7 +1,10 @@
-import { ConsoleLogger, Injectable } from '@nestjs/common';
+// C:\Users\user\Documents\wa-web\WhatsppWeb-React\whatsapp-clone-backend\src\whatsapp\whatsapp.service.ts
+import { ConsoleLogger, Inject, Injectable, forwardRef } from '@nestjs/common';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import { toDataURL } from 'qrcode';
 import { SocketService } from '../socket/socket.service';
+import { AppService } from '../app/app.service'; // ייבוא AppService
+import WAWebJS from 'whatsapp-web.js'; 
 
 @Injectable()
 export class WhatsAppService {
@@ -10,11 +13,11 @@ export class WhatsAppService {
   private _qrCode = '';
   status: string = 'initializing';
 
-  constructor(private readonly socketService: SocketService) {}
-
-  get qr(): string {
-    return this._qrCode;
-  }
+  constructor(
+    private readonly socketService: SocketService,
+    @Inject(forwardRef(() => AppService))
+    private readonly appService: AppService // הזרקת AppService באמצעות forwardRef
+  ) {}
 
   initClient(): Promise<void> {
     this._logger.log('Client init start');
@@ -36,7 +39,7 @@ export class WhatsAppService {
     this.client.on('authenticated', () => { this._logger.log('EVENT: authenticated'); this.onAuthenticated(); });
     this.client.on('auth_failure', (...args) => { this._logger.log('EVENT: auth_failure'); this.onAuthFailure(...args); });
     this.client.on('disconnected', (...args) => { this._logger.log('EVENT: disconnected'); this.onDisconnected(...args); });
-    this.client.on('message', this.onMessage);
+    this.client.on('message', this.onMessageWithMediaHandling); // שינוי כאן!
     this.client.on('loading_screen', this.onLoadingScreen);
     this.client.on('message_create', this.onMessageCreate);
     this.client.on('message_revoke_everyone', this.onMessageRevokeEveryone);
@@ -78,12 +81,29 @@ export class WhatsAppService {
     this.socketService.send('loading', { percent, msg });
     this._logger.log(`Client is loading: ${percent}; ${msg}`);
   };
+  
+  // פונקציה חדשה לטיפול בהודעות נכנסות כולל מדיה
+  private onMessageWithMediaHandling = async (msg: WAWebJS.Message) => {
+    this.socketService.send('message', { msg }); // שלח את ההודעה המקורית ל-frontend
+    this._logger.log(`Message has been received: ${msg.id.id}`);
+
+    if (msg.hasMedia) {
+      // הפעל את הורדת המדיה דרך ה-AppService באופן אסינכרוני
+      // (הפונקציה downloadMediaAsync כבר שולחת עדכון ל-socketService)
+      (this.appService as any).downloadMediaAsync(msg); // קאסט ל-any כדי למנוע בעיות עם פרטיות
+    }
+  };
+
+  private onMessageCreate = (msg) => {
+    this._logger.log('onMessageCreate', msg);
+    // אם תרצה לטפל גם בהודעות שאתה יוצר, תוכל להוסיף כאן לוגיקה דומה
+    if (msg.hasMedia) {
+      (this.appService as any).downloadMediaAsync(msg);
+    }
+  };
   private onMessage = (msg) => {
     this.socketService.send('message', { msg });
     this._logger.log(`Message has been recived: ${msg}`, msg);
-  };
-  private onMessageCreate = (msg) => {
-    this._logger.log('onMessageCreate', msg);
   };
   private onMessageRevokeEveryone = (after, before) => {
     this._logger.log('onMessageRevokeEveryone', after, before);
