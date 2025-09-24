@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
 import { SocketModule } from './socket/socket.module';
-import { WhatsappModule } from './whatsapp/whatsapp.module';
+import { WhatsAppModule } from './whatsapp/whatsapp.module';
 import { AppModule } from './app/app.module';
+import { MediaModule } from './media/media.module';
 
 @Module({
-  imports: [SocketModule, AppModule, WhatsappModule],
+  imports: [SocketModule, MediaModule, AppModule, WhatsAppModule],
 })
 export class WhatsappCloneModule {}

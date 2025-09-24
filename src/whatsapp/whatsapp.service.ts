@@ -1,22 +1,30 @@
-// C:\Users\user\Documents\wa-web\WhatsppWeb-React\whatsapp-clone-backend\src\whatsapp\whatsapp.service.ts
-import { ConsoleLogger, Inject, Injectable, forwardRef } from '@nestjs/common';
+import { ConsoleLogger, Injectable } from '@nestjs/common';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import { toDataURL } from 'qrcode';
 import { SocketService } from '../socket/socket.service';
-import { AppService } from '../app/app.service'; // ייבוא AppService
-import WAWebJS from 'whatsapp-web.js'; 
+import { MediaService } from '../media/media.service';
+import WAWebJS from 'whatsapp-web.js';
 
 @Injectable()
 export class WhatsAppService {
   client: Client;
   private _logger = new ConsoleLogger('WAService');
-  private _qrCode = '';
+  private _qrCode = ''; // נשמר פרטי
   status: string = 'initializing';
+
+  // ה-getter עבור qr
+  public get qr(): string { // נשנה ל-public getter ליתר ביטחון, אם הבעיה ממשיכה
+    return this._qrCode;
+  }
+
+  // בדיקה אם הקליינט מוכן לשימוש
+  public get isClientReady(): boolean {
+    return this.client && this.status === 'ready';
+  }
 
   constructor(
     private readonly socketService: SocketService,
-    @Inject(forwardRef(() => AppService))
-    private readonly appService: AppService // הזרקת AppService באמצעות forwardRef
+    private readonly mediaService: MediaService
   ) {}
 
   initClient(): Promise<void> {
@@ -39,9 +47,12 @@ export class WhatsAppService {
     this.client.on('authenticated', () => { this._logger.log('EVENT: authenticated'); this.onAuthenticated(); });
     this.client.on('auth_failure', (...args) => { this._logger.log('EVENT: auth_failure'); this.onAuthFailure(...args); });
     this.client.on('disconnected', (...args) => { this._logger.log('EVENT: disconnected'); this.onDisconnected(...args); });
-    this.client.on('message', this.onMessageWithMediaHandling); // שינוי כאן!
+    
+    // נשנה את handler ההודעות כדי ש-AppService יטפל גם במדיה
+    this.client.on('message', this.onMessageWithMediaHandling); 
+    this.client.on('message_create', this.onMessageCreateWithMediaHandling); // נטפל גם בהודעות שאנו יוצרים
+
     this.client.on('loading_screen', this.onLoadingScreen);
-    this.client.on('message_create', this.onMessageCreate);
     this.client.on('message_revoke_everyone', this.onMessageRevokeEveryone);
     this.client.on('message_revoke_me', this.onMessageRevokeMe);
     this.client.on('message_ack', this.onMessageAck);
@@ -55,6 +66,7 @@ export class WhatsAppService {
     this._logger.log('Client init done');
     return promise;
   }
+
   private onQR = async (qr: string) => {
     this.status = 'qr';
     this._qrCode = await toDataURL(qr);
@@ -63,7 +75,7 @@ export class WhatsAppService {
   };
   private onReady = () => {
     this.status = 'ready';
-    this._qrCode = '';
+    this._qrCode = ''; // ננקה QR ברגע שהקליינט מוכן
     this.socketService.send('ready');
     this._logger.log('Client is ready');
   };
@@ -72,68 +84,85 @@ export class WhatsAppService {
     this.socketService.send('authenticated');
     this._logger.log('Client is authenticated');
   };
-  private onAuthFailure = (msg) => {
+  private onAuthFailure = (msg: string) => { // msg הוא בדרך כלל string
     this.status = 'auth_failure';
     this.socketService.send('authentication_failed');
     this._logger.log('Client is authentication failed', msg);
   };
-  private onLoadingScreen = (percent, msg) => {
+  private onLoadingScreen = (percent: string, msg: string) => { // הוספת טיפוסים
     this.socketService.send('loading', { percent, msg });
     this._logger.log(`Client is loading: ${percent}; ${msg}`);
   };
   
   // פונקציה חדשה לטיפול בהודעות נכנסות כולל מדיה
   private onMessageWithMediaHandling = async (msg: WAWebJS.Message) => {
-    this.socketService.send('message', { msg }); // שלח את ההודעה המקורית ל-frontend
+    // שלח את ההודעה המקורית ל-frontend מיד
+    this.socketService.send('message', { msg }); 
     this._logger.log(`Message has been received: ${msg.id.id}`);
 
     if (msg.hasMedia) {
-      // הפעל את הורדת המדיה דרך ה-AppService באופן אסינכרוני
-      // (הפונקציה downloadMediaAsync כבר שולחת עדכון ל-socketService)
-      (this.appService as any).downloadMediaAsync(msg); // קאסט ל-any כדי למנוע בעיות עם פרטיות
+      // קבל את המטא-דאטה של המדיה
+      const mediaMetadata = await this.mediaService.getMediaMetadata(msg);
+      if (mediaMetadata) {
+        // הפעל את הורדת המדיה דרך ה-MediaService באופן אסינכרוני
+        this.mediaService.downloadMediaAsync(msg, mediaMetadata);
+      }
     }
   };
 
-  private onMessageCreate = (msg) => {
-    this._logger.log('onMessageCreate', msg);
-    // אם תרצה לטפל גם בהודעות שאתה יוצר, תוכל להוסיף כאן לוגיקה דומה
+  private onMessageCreateWithMediaHandling = async (msg: WAWebJS.Message) => {
+    this._logger.log('onMessageCreate', msg.id.id);
+    // שלח את ההודעה שיצרנו ל-frontend מיד
+    this.socketService.send('message_create', { msg }); 
+
+    // אם זו הודעת מדיה שנוצרה על ידינו, נטפל בהורדה שלה (אם היא נשלחה כקובץ)
     if (msg.hasMedia) {
-      (this.appService as any).downloadMediaAsync(msg);
+        const mediaMetadata = await this.mediaService.getMediaMetadata(msg);
+        if (mediaMetadata) {
+            this.mediaService.downloadMediaAsync(msg, mediaMetadata);
+        }
     }
   };
-  private onMessage = (msg) => {
-    this.socketService.send('message', { msg });
-    this._logger.log(`Message has been recived: ${msg}`, msg);
+  
+  private onMessageRevokeEveryone = (after: WAWebJS.Message, before: WAWebJS.Message | null) => {
+    this._logger.log('onMessageRevokeEveryone', after.id.id, before?.id.id);
+    this.socketService.send('message_revoke_everyone', { after, before });
   };
-  private onMessageRevokeEveryone = (after, before) => {
-    this._logger.log('onMessageRevokeEveryone', after, before);
+  private onMessageRevokeMe = (msg: WAWebJS.Message) => {
+    this._logger.log('onMessageRevokeMe', msg.id.id);
+    this.socketService.send('message_revoke_me', { msg });
   };
-  private onMessageRevokeMe = (msg) => {
-    this._logger.log('onMessageRevokeEveryone', msg);
+  private onMessageAck = (msg: WAWebJS.Message, ack: WAWebJS.MessageAck) => {
+    this._logger.log('onMessageAck', msg.id.id, ack);
+    this.socketService.send('message_ack', { msg, ack });
   };
-  private onMessageAck = (msg, ack) => {
-    this._logger.log('onMessageAck', msg, ack);
+  private onGroupJoin = (notification: WAWebJS.GroupNotification) => { // הוספנו WAWebJS.GroupNotification
+    this._logger.log('onGroupJoin', notification.id); // תיקון: notification.id בלבד
+    this.socketService.send('group_join', { notification });
   };
-  private onGroupJoin = (notification) => {
-    this._logger.log('onGroupJoin', notification);
+  private onGroupLeave = (notification: WAWebJS.GroupNotification) => { // הוספנו WAWebJS.GroupNotification
+    this._logger.log('onGroupLeave', notification.id); // תיקון: notification.id בלבד
+    this.socketService.send('group_leave', { notification });
   };
-  private onGroupLeave = (notification) => {
-    this._logger.log('onGroupLeave', notification);
+  private onGroupUpdate = (notification: WAWebJS.GroupNotification) => { // הוספנו WAWebJS.GroupNotification
+    this._logger.log('onGroupUpdate', notification.id); // תיקון: notification.id בלבד
+    this.socketService.send('group_update', { notification });
   };
-  private onGroupUpdate = (notification) => {
-    this._logger.log('onGroupUpdate', notification);
+  private onGroupAdminChanged = (notification: WAWebJS.GroupNotification) => { // הוספנו WAWebJS.GroupNotification
+    this._logger.log('onGroupAdminChanged', notification.id); // תיקון: notification.id בלבד
+    this.socketService.send('group_admin_changed', { notification });
   };
-  private onGroupAdminChanged = (notification) => {
-    this._logger.log('onGroupAdminChanged', notification);
-  };
-  private onStateChanged = (state) => {
+  private onStateChanged = (state: WAWebJS.WAState) => {
     this._logger.log('onStateChanged', state);
+    this.socketService.send('change_state', { state });
   };
-  private onDisconnected = (reason) => {
+  private onDisconnected = (reason: string) => { // תיקון: reason הוא כנראה string, לא WAWebJS.ClientDisconnectedReason
     this.status = 'disconnected';
     this._logger.log('onDisconnected', reason);
+    this.socketService.send('disconnected', { reason });
   };
-  private onContactChanged = (message, oldId, newId, isContact) => {
-    this._logger.log('onContactChanged', message, oldId, newId, isContact);
+  private onContactChanged = (message: WAWebJS.Message, oldId: string, newId: string, isContact: boolean) => {
+    this._logger.log('onContactChanged', message.id.id, oldId, newId, isContact);
+    this.socketService.send('contact_changed', { message, oldId, newId, isContact });
   };
 }
