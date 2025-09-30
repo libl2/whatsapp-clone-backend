@@ -3,7 +3,7 @@ import { WhatsAppService } from '../whatsapp/whatsapp.service';
 import WAWebJS from 'whatsapp-web.js';
 import * as fs from 'fs';
 import * as path from 'path';
-import { SocketService } from '../socket/socket.service'; // ודא שהנתיב נכון
+import { SocketService } from '../socket/socket.service'; // Make sure the path is correct
 
 @Injectable()
 export class AppService {
@@ -13,7 +13,7 @@ export class AppService {
 
   constructor(
     private readonly waService: WhatsAppService,
-    private readonly socketService: SocketService, // הזרקת שירות הסוקט
+    private readonly socketService: SocketService, // Injecting the SocketService
   ) {
     if (!fs.existsSync(this.MEDIA_SAVE_PATH)) {
       fs.mkdirSync(this.MEDIA_SAVE_PATH, { recursive: true });
@@ -57,15 +57,24 @@ export class AppService {
       const chat = await this.waService.client.getChatById(id);
       const messages = await chat.fetchMessages(model);
 
-      await Promise.all(messages.map(message => this.processMessageMedia(message)));
+      // Run media processing in the background without waiting
+      messages.forEach(message => {
+        if (message.hasMedia) {
+          this.processMessageMediaInBackground(message); // Call without await
+        }
+      });
 
+      // Return messages immediately
       return messages;
     } catch (err) {
       this._logger.error(`Error fetching messages for chat ${id}: ${err.message}`);
       return [];
     }
   }
-
+  
+  // =================================================================
+  // RESTORED METHOD 1: searchMessages
+  // =================================================================
   async searchMessages(model: any): Promise<WAWebJS.Message[]> {
     try {
       const messages = await this.waService.client.searchMessages(model.query, {
@@ -74,7 +83,11 @@ export class AppService {
         limit: model.limit,
       });
       
-      await Promise.all(messages.map(message => this.processMessageMedia(message)));
+      messages.forEach(message => {
+        if (message.hasMedia) {
+          this.processMessageMediaInBackground(message);
+        }
+      });
 
       return messages;
     } catch (err) {
@@ -83,17 +96,24 @@ export class AppService {
     }
   }
 
+  // =================================================================
+  // RESTORED METHOD 2: sendMessage
+  // =================================================================
   async sendMessage(id: string, model: any): Promise<WAWebJS.Message> {
     try {
       if (model.message) {
         return await this.waService.client.sendMessage(id, model.message);
       }
-      throw new Error('Method not implemented for this model.');
+      throw new Error('Message content is missing in the model.');
     } catch (err) {
+        this._logger.error(`Failed to send message to ${id}: ${err.message}`);
       return undefined;
     }
   }
 
+  // =================================================================
+  // RESTORED METHOD 3: getStatus
+  // =================================================================
   getStatus() {
     return {
       whatsapp: this.waService.status,
@@ -101,9 +121,14 @@ export class AppService {
   }
 
   /**
-   * פונקציית עזר מרכזית לטיפול במדיה.
+   * This function runs independently in the background.
+   * It downloads and saves the media, then sends an update via socket.
    */
-  private async processMessageMedia(message: WAWebJS.Message): Promise<void> {
+  private async processMessageMediaInBackground(message: WAWebJS.Message): Promise<void> {
+    if ((message as any).mediaUrl !== undefined) {
+      return;
+    }
+
     if (!message.hasMedia || message.type === 'revoked') {
       return;
     }
@@ -111,39 +136,39 @@ export class AppService {
     try {
       const media = await message.downloadMedia();
 
-      // === התיקון שהוספנו ===
-      // בדיקה חיונית כדי לוודא שקיבלנו אובייקט מדיה תקין
       if (!media || !media.data) {
-        this._logger.warn(`Could not retrieve media data for message ${message.id.id}`);
-        (message as any).mediaError = true;
-        return; // יציאה בטוחה מהפונקציה
+        throw new Error('Media data is missing');
       }
-      // =======================
 
       const fileExtension = media.mimetype.split('/')[1] || 'bin';
       const filename = `${message.timestamp}_${message.id.id}.${fileExtension}`;
-      
       const chatId = message.fromMe ? message.to : message.from;
       const chatName = chatId.replace(/[^a-zA-Z0-9]/g, '_');
-      
       const chatFolderPath = path.join(this.MEDIA_SAVE_PATH, chatName);
       const filePath = path.join(chatFolderPath, filename);
-
-      (message as any).mediaUrl = `${this.BASE_URL}/media/${chatName}/${filename}`;
+      const mediaUrl = `${this.BASE_URL}/media/${chatName}/${filename}`;
 
       if (!fs.existsSync(filePath)) {
         if (!fs.existsSync(chatFolderPath)) {
           fs.mkdirSync(chatFolderPath, { recursive: true });
         }
-        
         fs.writeFileSync(filePath, media.data, 'base64');
-        this._logger.log(`Media downloaded and saved: ${filePath}`);
+        this._logger.log(`Media processed and saved: ${filePath}`);
       }
-      
+
+      // ★ Critical step: Send the update to the client via WebSocket
+      // The name of the event is 'media-ready'
+      this.socketService.send('media-ready', {
+        messageId: message.id._serialized,
+        mediaUrl: mediaUrl,
+      });
+
     } catch (err) {
-      this._logger.error(`Failed to process media for message ${message.id.id}: ${err.message}`);
-      (message as any).mediaUrl = null;
-      (message as any).mediaError = true;
+      this._logger.error(`Failed to process media in background for message ${message.id.id}: ${err.message}`);
+      // You can also send an error event to the client if you want
+      this.socketService.send('media-error', {
+        messageId: message.id._serialized,
+      });
     }
   }
 }
