@@ -125,11 +125,16 @@ export class AppService {
    * It downloads and saves the media, then sends an update via socket.
    */
   private async processMessageMediaInBackground(message: WAWebJS.Message): Promise<void> {
-    if ((message as any).mediaUrl !== undefined) {
+    if (!message.hasMedia || message.type === 'revoked') {
       return;
     }
 
-    if (!message.hasMedia || message.type === 'revoked') {
+    // אם יש כבר mediaUrl, נשתמש בו
+    if ((message as any).mediaUrl !== undefined) {
+      this.socketService.send('media-ready', {
+        messageId: message.id._serialized,
+        mediaUrl: (message as any).mediaUrl,
+      });
       return;
     }
 
@@ -155,6 +160,9 @@ export class AppService {
         fs.writeFileSync(filePath, media.data, 'base64');
         this._logger.log(`Media processed and saved: ${filePath}`);
       }
+
+      // עדכון ה-mediaUrl על ההודעה עצמה
+      (message as any).mediaUrl = mediaUrl;
 
       // ★ Critical step: Send the update to the client via WebSocket
       // The name of the event is 'media-ready'
