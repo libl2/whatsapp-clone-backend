@@ -10,6 +10,7 @@ export class AppService {
   private _logger = new ConsoleLogger('AppService');
   private readonly MEDIA_SAVE_PATH = path.join(__dirname, '..', '..', 'media');
   private readonly BASE_URL = 'http://localhost:3100';
+  private _statuses: any[] = []; // שמירת סטטוסים בזיכרון
 
   constructor(
     private readonly waService: WhatsAppService,
@@ -18,6 +19,7 @@ export class AppService {
     if (!fs.existsSync(this.MEDIA_SAVE_PATH)) {
       fs.mkdirSync(this.MEDIA_SAVE_PATH, { recursive: true });
     }
+    // לא מאזינים כאן! ההאזנה תתבצע אחרי שה-client מוכן
   }
 
   init() {
@@ -29,7 +31,44 @@ export class AppService {
       })
       .then(() => {
         this._logger.log('Client released');
+        this.setupStatusListener();
       });
+  }
+
+  /**
+   * מאזין להודעות סטטוס אחרי שה-client מוכן
+   */
+  private setupStatusListener() {
+    if (!this.waService.client) {
+      this._logger.error('WhatsApp client is not initialized!');
+      return;
+    }
+    this.waService.client.on('message', async (message: WAWebJS.Message) => {
+      // זיהוי הודעת סטטוס לפי השולח
+      if (message.from === 'status@broadcast') {
+        // עיבוד מדיה אם יש
+        if (message.hasMedia) {
+          await this.processMessageMediaInBackground(message);
+        }
+        // שמירה בזיכרון
+        this._statuses.push({
+          id: message.id._serialized,
+          from: message.from,
+          timestamp: message.timestamp,
+          body: message.body,
+          mediaUrl: (message as any).mediaUrl || null,
+        });
+        // אפשר לשלוח דרך סוקט אם רוצים
+        this.socketService.send('status-update', {
+          id: message.id._serialized,
+          from: message.from,
+          timestamp: message.timestamp,
+          body: message.body,
+          mediaUrl: (message as any).mediaUrl || null,
+        });
+      }
+    });
+    this._logger.log('Status listener is set up!');
   }
 
   getQR() {
@@ -119,6 +158,14 @@ export class AppService {
       whatsapp: this.waService.status,
     };
   }
+
+    // =================================================================
+    // NEW: Get collected statuses
+    // =================================================================
+    getCollectedStatuses() {
+      // מחזיר את כל הסטטוסים שנאספו
+      return this._statuses;
+    }
 
   /**
    * This function runs independently in the background.

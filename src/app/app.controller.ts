@@ -40,8 +40,8 @@ export class AppController {
     return this.appService.sendMessage(id, model);
   }
 
-  @Get('status')
-  getStatus() {
-    return this.appService.getStatus();
+  @Get('statuses')
+  async getStatuses() {
+    return this.appService.getCollectedStatuses();
   }
 }
