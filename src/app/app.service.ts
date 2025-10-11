@@ -46,6 +46,21 @@ export class AppService {
     this.waService.client.on('message', async (message: WAWebJS.Message) => {
       // זיהוי הודעת סטטוס לפי השולח
       if (message.from === 'status@broadcast') {
+        // זיהוי מזהה השולח
+        const contactId = message.author || null;
+        let contactName = null;
+        let contactAvatar = null;
+        if (contactId) {
+          try {
+            // ננסה להביא את שם השולח
+            const contact = await this.waService.client.getContactById(contactId);
+            contactName = contact?.pushname || contact?.name || contactId;
+            // ננסה להביא את תמונת הפרופיל
+            contactAvatar = await this.waService.client.getProfilePicUrl(contactId);
+          } catch (err) {
+            this._logger.error(`Failed to fetch contact info for status: ${contactId}`);
+          }
+        }
         // עיבוד מדיה אם יש
         if (message.hasMedia) {
           await this.processMessageMediaInBackground(message);
@@ -56,15 +71,24 @@ export class AppService {
           from: message.from,
           timestamp: message.timestamp,
           body: message.body,
+          type: message.type,
           mediaUrl: (message as any).mediaUrl || null,
+          contactId,
+          contactName,
+          contactAvatar,
         });
         // אפשר לשלוח דרך סוקט אם רוצים
+        this._logger.log(`Preparing to send status. Message type is: ${message.type}`);
         this.socketService.send('status-update', {
           id: message.id._serialized,
           from: message.from,
           timestamp: message.timestamp,
           body: message.body,
+          type: message.type,
           mediaUrl: (message as any).mediaUrl || null,
+          contactId,
+          contactName,
+          contactAvatar,
         });
       }
     });
