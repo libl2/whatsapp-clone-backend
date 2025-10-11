@@ -78,7 +78,6 @@ export class AppService {
           contactAvatar,
         });
         // אפשר לשלוח דרך סוקט אם רוצים
-        this._logger.log(`Preparing to send status. Message type is: ${message.type}`);
         this.socketService.send('status-update', {
           id: message.id._serialized,
           from: message.from,
