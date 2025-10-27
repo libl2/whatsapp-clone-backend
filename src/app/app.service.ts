@@ -54,7 +54,8 @@ export class AppService {
           try {
             // ננסה להביא את שם השולח
             const contact = await this.waService.client.getContactById(contactId);
-            contactName = contact?.pushname || contact?.name || contactId;
+            // Prefer the name saved in the phone (contact.name) over the pushname
+            contactName = contact?.name || contact?.pushname || contactId;
             // ננסה להביא את תמונת הפרופיל
             contactAvatar = await this.waService.client.getProfilePicUrl(contactId);
           } catch (err) {
