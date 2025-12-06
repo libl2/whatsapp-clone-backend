@@ -43,56 +43,94 @@ export class AppService {
       this._logger.error('WhatsApp client is not initialized!');
       return;
     }
+
     this.waService.client.on('message', async (message: WAWebJS.Message) => {
       // זיהוי הודעת סטטוס לפי השולח
       if (message.from === 'status@broadcast') {
-        // זיהוי מזהה השולח
-        const contactId = message.author || null;
-        let contactName = null;
-        let contactAvatar = null;
+        // נסיון למציאת מזהה השולח ממקורות שונים בהודעה
+        let contactId = this.extractContactId(message);
+        let contactName: string = null;
+        let contactAvatar: string = null;
+
         if (contactId) {
-          try {
-            // ננסה להביא את שם השולח
-            const contact = await this.waService.client.getContactById(contactId);
-            // Prefer the name saved in the phone (contact.name) over the pushname
-            contactName = contact?.name || contact?.pushname || contactId;
-            // ננסה להביא את תמונת הפרופיל
-            contactAvatar = await this.waService.client.getProfilePicUrl(contactId);
-          } catch (err) {
-            this._logger.error(`Failed to fetch contact info for status: ${contactId}`);
+          // sanitize id: אם חסר suffix, הוסף @c.us
+          if (!contactId.includes('@')) {
+            contactId = `${contactId}@c.us`;
           }
+          try {
+            const contact = await this.waService.client.getContactById(contactId);
+            contactName = contact?.name || contact?.pushname || contactId.split('@')[0];
+          } catch (err) {
+            this._logger.log(`getContactById failed for ${contactId}`, err?.message ?? err);
+            contactName = contactId.split('@')[0];
+          }
+
+          try {
+            contactAvatar = await this.waService.client.getProfilePicUrl(contactId);
+          } catch {
+            contactAvatar = null;
+          }
+        } else {
+          // לא הצלחנו לחלץ id — נספק fallback כללי
+          contactId = null;
+          contactName = 'לא ידוע';
+          contactAvatar = null;
         }
-        // עיבוד מדיה אם יש
+
+        // עיבוד מדיה אם יש (ברקע או סינכרוני כפי שהיה)
         if (message.hasMedia) {
           await this.processMessageMediaInBackground(message);
         }
+
+        const statusItem = {
+          id: message.id?._serialized ?? (message.id && message.id.id) ?? String(Date.now()),
+          from: message.from,
+          timestamp: message.timestamp,
+          body: message.body,
+          type: message.type,
+          mediaUrl: (message as any).mediaUrl || null,
+          contactId,
+          contactName,
+          contactAvatar,
+        };
+
         // שמירה בזיכרון
-        this._statuses.push({
-          id: message.id._serialized,
-          from: message.from,
-          timestamp: message.timestamp,
-          body: message.body,
-          type: message.type,
-          mediaUrl: (message as any).mediaUrl || null,
-          contactId,
-          contactName,
-          contactAvatar,
-        });
-        // אפשר לשלוח דרך סוקט אם רוצים
-        this.socketService.send('status-update', {
-          id: message.id._serialized,
-          from: message.from,
-          timestamp: message.timestamp,
-          body: message.body,
-          type: message.type,
-          mediaUrl: (message as any).mediaUrl || null,
-          contactId,
-          contactName,
-          contactAvatar,
-        });
+        this._statuses.push(statusItem);
+
+        // שליחה ללקוח דרך סוקט
+        this.socketService.send('status-update', statusItem);
       }
     });
     this._logger.log('Status listener is set up!');
+  }
+
+  // helper: extract contact id from various places in the message object (status broadcasts are tricky)
+  private extractContactId(message: any): string | null {
+    // 1) common: message.author or message.participant
+    if (message.author) return message.author;
+    if (message.participant) return message.participant;
+
+    // 2) message._data may contain participant/author depending on WAWebJS version
+    if (message._data) {
+      if (message._data.author) return message._data.author;
+      if (message._data.participant) return message._data.participant;
+    }
+
+    // 3) try to parse from id serialized (many status ids include the origin contact at the end)
+    const serialized = message.id?._serialized || message.id;
+    if (typeof serialized === 'string') {
+      const match = serialized.match(/([0-9]+@c\.us|[0-9]+@s\.whatsapp\.net)/);
+      if (match) return match[1];
+      // sometimes the serialized id ends with _{contact}@c.us
+      const parts = serialized.split('_');
+      const last = parts[parts.length - 1] || '';
+      if (/@(c\.us|s\.whatsapp\.net)$/.test(last)) return last;
+    }
+
+    // 4) sometimes message.from contains the contact for non-broadcast - but for status@broadcast it's not useful
+    if (message.from && message.from !== 'status@broadcast') return message.from;
+
+    return null;
   }
 
   getQR() {
