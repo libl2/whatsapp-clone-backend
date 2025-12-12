@@ -57,17 +57,38 @@ export class AppService {
           if (!contactId.includes('@')) {
             contactId = `${contactId}@c.us`;
           }
-          try {
-            const contact = await this.waService.client.getContactById(contactId);
-            contactName = contact?.name || contact?.pushname || contactId.split('@')[0];
-          } catch (err) {
-            this._logger.log(`getContactById failed for ${contactId}`, err?.message ?? err);
-            contactName = contactId.split('@')[0];
+
+          let resolvedName: string = null;
+          const msg = message as any; // Cast to any to access undocumented fields
+
+          // 1) FIRST: try notifyName from the message itself (זהו השם שמוצג על הסטטוס)
+          if (msg.notifyName && msg.notifyName.trim()) {
+            resolvedName = msg.notifyName.trim();
+            this._logger.log(`[Status] Got name from message.notifyName: ${resolvedName}`);
           }
 
+          // 2) SECOND: try _data.notifyName or _data.pushname
+          if (!resolvedName && msg._data) {
+            if (msg._data.notifyName && msg._data.notifyName.trim()) {
+              resolvedName = msg._data.notifyName.trim();
+              this._logger.log(`[Status] Got name from _data.notifyName: ${resolvedName}`);
+            } else if (msg._data.pushname && msg._data.pushname.trim()) {
+              resolvedName = msg._data.pushname.trim();
+              this._logger.log(`[Status] Got name from _data.pushname: ${resolvedName}`);
+            }
+          }
+
+          // 3) FALLBACK: use id part or +phone number
+          contactName = resolvedName || contactId.split('@')[0];
+          if (/^\d+$/.test(contactName)) {
+            contactName = `+${contactName}`;
+          }
+
+          // Try to get avatar (may also fail, but that's ok - we have fallback on frontend)
           try {
             contactAvatar = await this.waService.client.getProfilePicUrl(contactId);
           } catch {
+            this._logger.log(`[Status] getProfilePicUrl failed for ${contactId}, will use fallback`);
             contactAvatar = null;
           }
         } else {
@@ -77,7 +98,7 @@ export class AppService {
           contactAvatar = null;
         }
 
-        // עיבוד מדיה אם יש (ברקע או סינכרוני כפי שהיה)
+        // עיבוד מדיה אם יש
         if (message.hasMedia) {
           await this.processMessageMediaInBackground(message);
         }
