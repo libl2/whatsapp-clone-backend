@@ -1,4 +1,9 @@
-import { ConsoleLogger, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConsoleLogger,
+  Injectable,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { WhatsAppService } from '../whatsapp/whatsapp.service';
 import WAWebJS from 'whatsapp-web.js';
 import * as fs from 'fs';
@@ -75,6 +80,26 @@ export class AppService {
             } else if (msg._data.pushname && msg._data.pushname.trim()) {
               resolvedName = msg._data.pushname.trim();
               this._logger.log(`[Status] Got name from _data.pushname: ${resolvedName}`);
+            }
+          }
+
+          // 3) THIRD: try contact details from WA client (matches chat list resolution)
+          if (!resolvedName) {
+            try {
+              const contact = await this.waService.client.getContactById(contactId);
+              if (contact) {
+                const fromContact =
+                  (contact as any).name ||
+                  (contact as any).pushname ||
+                  (contact as any).verifiedName ||
+                  (contact as any).shortName;
+                if (fromContact && String(fromContact).trim()) {
+                  resolvedName = String(fromContact).trim();
+                  this._logger.log(`[Status] Got name from contact object: ${resolvedName}`);
+                }
+              }
+            } catch (err) {
+              this._logger.warn(`[Status] getContactById failed for ${contactId}: ${err?.message || err}`);
             }
           }
 
@@ -158,23 +183,26 @@ export class AppService {
     return this.waService.qr;
   }
 
-  async getAvatar(id: string): Promise<string> {
-    try {
-      return await this.waService.client.getProfilePicUrl(id);
-    } catch (err) {
-      return '';
+  private ensureClientReady(operation: string): void {
+    if (!this.waService.client || this.waService.status !== 'ready') {
+      throw new ServiceUnavailableException(
+        `WhatsApp client is not ready for ${operation}. Current status: ${this.waService.status}`,
+      );
     }
+  }
+
+  async getAvatar(id: string): Promise<string> {
+    this.ensureClientReady('getAvatar');
+    return await this.waService.client.getProfilePicUrl(id);
   }
 
   async getChats(): Promise<WAWebJS.Chat[]> {
-    try {
-      return await this.waService.client.getChats();
-    } catch (err) {
-      return [];
-    }
+    this.ensureClientReady('getChats');
+    return await this.waService.client.getChats();
   }
 
   async getMessages(id: string, model: any): Promise<WAWebJS.Message[]> {
+    this.ensureClientReady('getMessages');
     try {
       const chat = await this.waService.client.getChatById(id);
       const messages = await chat.fetchMessages(model);
@@ -190,7 +218,7 @@ export class AppService {
       return messages;
     } catch (err) {
       this._logger.error(`Error fetching messages for chat ${id}: ${err.message}`);
-      return [];
+      throw err;
     }
   }
   
@@ -198,6 +226,7 @@ export class AppService {
   // RESTORED METHOD 1: searchMessages
   // =================================================================
   async searchMessages(model: any): Promise<WAWebJS.Message[]> {
+    this.ensureClientReady('searchMessages');
     try {
       const messages = await this.waService.client.searchMessages(model.query, {
         chatId: model.chatId,
@@ -214,7 +243,7 @@ export class AppService {
       return messages;
     } catch (err) {
       this._logger.error(`Error searching messages: ${err.message}`);
-      return [];
+      throw err;
     }
   }
 
@@ -222,14 +251,15 @@ export class AppService {
   // RESTORED METHOD 2: sendMessage
   // =================================================================
   async sendMessage(id: string, model: any): Promise<WAWebJS.Message> {
+    this.ensureClientReady('sendMessage');
     try {
       if (model.message) {
         return await this.waService.client.sendMessage(id, model.message);
       }
-      throw new Error('Message content is missing in the model.');
+      throw new BadRequestException('Message content is missing in the model.');
     } catch (err) {
-        this._logger.error(`Failed to send message to ${id}: ${err.message}`);
-      return undefined;
+      this._logger.error(`Failed to send message to ${id}: ${err.message}`);
+      throw err;
     }
   }
 

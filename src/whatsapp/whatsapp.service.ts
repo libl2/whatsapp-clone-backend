@@ -9,6 +9,8 @@ export class WhatsAppService {
   private _logger = new ConsoleLogger('WAService');
   private _qrCode = '';
   status: string = 'initializing';
+  private _readyWatchdog: NodeJS.Timeout | null = null;
+  private _lastState: string | null = null;
 
   constructor(private readonly socketService: SocketService) {}
 
@@ -52,6 +54,42 @@ export class WhatsAppService {
     this._logger.log('Client init done');
     return promise;
   }
+
+  private startReadyWatchdog(): void {
+    if (this._readyWatchdog) {
+      clearInterval(this._readyWatchdog);
+    }
+
+    this._readyWatchdog = setInterval(async () => {
+      if (!this.client) {
+        return;
+      }
+
+      try {
+        const state = (await this.client.getState()) as string;
+        if (state && state !== this._lastState) {
+          this._lastState = state;
+          this._logger.log(`WA state: ${state}`);
+        }
+
+        // Fallback for cases where "ready" event is not emitted.
+        if (state === 'CONNECTED' && this.status !== 'ready') {
+          this._logger.warn('Ready event missing; promoting CONNECTED state to ready');
+          this.onReady();
+        }
+      } catch (err) {
+        this._logger.warn(`Ready watchdog getState failed: ${err?.message || err}`);
+      }
+    }, 3000);
+  }
+
+  private stopReadyWatchdog(): void {
+    if (this._readyWatchdog) {
+      clearInterval(this._readyWatchdog);
+      this._readyWatchdog = null;
+    }
+  }
+
   private onQR = async (qr: string) => {
     this.status = 'qr';
     this._qrCode = await toDataURL(qr);
@@ -61,16 +99,19 @@ export class WhatsAppService {
   private onReady = () => {
     this.status = 'ready';
     this._qrCode = '';
+    this.stopReadyWatchdog();
     this.socketService.send('ready');
     this._logger.log('Client is ready');
   };
   private onAuthenticated = () => {
     this.status = 'authenticated';
+    this.startReadyWatchdog();
     this.socketService.send('authenticated');
     this._logger.log('Client is authenticated');
   };
   private onAuthFailure = (msg) => {
     this.status = 'auth_failure';
+    this.stopReadyWatchdog();
     this.socketService.send('authentication_failed');
     this._logger.log('Client is authentication failed', msg);
   };
@@ -111,6 +152,7 @@ export class WhatsAppService {
   };
   private onDisconnected = (reason) => {
     this.status = 'disconnected';
+    this.stopReadyWatchdog();
     this._logger.log('onDisconnected', reason);
   };
   private onContactChanged = (message, oldId, newId, isContact) => {

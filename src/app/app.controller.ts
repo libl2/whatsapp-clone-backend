@@ -17,6 +17,11 @@ export class AppController {
     };
   }
 
+  @Get('status')
+  getStatus() {
+    return this.appService.getStatus();
+  }
+
   @Get('avatar/:id')
   async getAvatar(@Param('id') id: string) {
     return {
