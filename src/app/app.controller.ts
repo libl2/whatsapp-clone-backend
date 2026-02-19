@@ -45,6 +45,11 @@ export class AppController {
     return this.appService.sendMessage(id, model);
   }
 
+  @Post('chat/:id/mark-read')
+  markChatAsRead(@Param('id') id: string) {
+    return this.appService.markChatAsRead(id);
+  }
+
   @Get('statuses')
   async getStatuses() {
     return this.appService.getCollectedStatuses();

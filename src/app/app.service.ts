@@ -263,6 +263,18 @@ export class AppService {
     }
   }
 
+  async markChatAsRead(id: string): Promise<{ success: boolean }> {
+    this.ensureClientReady('markChatAsRead');
+    try {
+      const chat = await this.waService.client.getChatById(id);
+      await chat.sendSeen();
+      return { success: true };
+    } catch (err) {
+      this._logger.error(`Failed to mark chat as read for ${id}: ${err.message}`);
+      throw err;
+    }
+  }
+
   // =================================================================
   // RESTORED METHOD 3: getStatus
   // =================================================================
