@@ -1,4 +1,4 @@
-import {
+﻿import {
   BadRequestException,
   ConsoleLogger,
   Injectable,
@@ -15,7 +15,9 @@ export class AppService {
   private _logger = new ConsoleLogger('AppService');
   private readonly MEDIA_SAVE_PATH = path.join(__dirname, '..', '..', 'media');
   private readonly BASE_URL = 'http://localhost:3100';
-  private _statuses: any[] = []; // שמירת סטטוסים בזיכרון
+  private _statusIds = new Set<string>();
+  private _statusListenerBound = false;
+  private _statuses: any[] = []; // ׳©׳׳™׳¨׳× ׳¡׳˜׳˜׳•׳¡׳™׳ ׳‘׳–׳™׳›׳¨׳•׳
 
   constructor(
     private readonly waService: WhatsAppService,
@@ -24,7 +26,7 @@ export class AppService {
     if (!fs.existsSync(this.MEDIA_SAVE_PATH)) {
       fs.mkdirSync(this.MEDIA_SAVE_PATH, { recursive: true });
     }
-    // לא מאזינים כאן! ההאזנה תתבצע אחרי שה-client מוכן
+    // ׳׳ ׳׳׳–׳™׳ ׳™׳ ׳›׳׳! ׳”׳”׳׳–׳ ׳” ׳×׳×׳‘׳¦׳¢ ׳׳—׳¨׳™ ׳©׳”-client ׳׳•׳›׳
   }
 
   init() {
@@ -41,24 +43,31 @@ export class AppService {
   }
 
   /**
-   * מאזין להודעות סטטוס אחרי שה-client מוכן
+   * ׳׳׳–׳™׳ ׳׳”׳•׳“׳¢׳•׳× ׳¡׳˜׳˜׳•׳¡ ׳׳—׳¨׳™ ׳©׳”-client ׳׳•׳›׳
    */
   private setupStatusListener() {
+    if (this._statusListenerBound) {
+      this._logger.warn('Status listener already set up; skipping duplicate registration');
+      return;
+    }
+
     if (!this.waService.client) {
       this._logger.error('WhatsApp client is not initialized!');
       return;
     }
 
+    this._statusListenerBound = true;
+
     this.waService.client.on('message', async (message: WAWebJS.Message) => {
-      // זיהוי הודעת סטטוס לפי השולח
+      // ׳–׳™׳”׳•׳™ ׳”׳•׳“׳¢׳× ׳¡׳˜׳˜׳•׳¡ ׳׳₪׳™ ׳”׳©׳•׳׳—
       if (message.from === 'status@broadcast') {
-        // נסיון למציאת מזהה השולח ממקורות שונים בהודעה
+        // ׳ ׳¡׳™׳•׳ ׳׳׳¦׳™׳׳× ׳׳–׳”׳” ׳”׳©׳•׳׳— ׳׳׳§׳•׳¨׳•׳× ׳©׳•׳ ׳™׳ ׳‘׳”׳•׳“׳¢׳”
         let contactId = this.extractContactId(message);
         let contactName: string = null;
         let contactAvatar: string = null;
 
         if (contactId) {
-          // sanitize id: אם חסר suffix, הוסף @c.us
+          // sanitize id: ׳׳ ׳—׳¡׳¨ suffix, ׳”׳•׳¡׳£ @c.us
           if (!contactId.includes('@')) {
             contactId = `${contactId}@c.us`;
           }
@@ -66,7 +75,7 @@ export class AppService {
           let resolvedName: string = null;
           const msg = message as any; // Cast to any to access undocumented fields
 
-          // 1) FIRST: try notifyName from the message itself (זהו השם שמוצג על הסטטוס)
+          // 1) FIRST: try notifyName from the message itself (׳–׳”׳• ׳”׳©׳ ׳©׳׳•׳¦׳’ ׳¢׳ ׳”׳¡׳˜׳˜׳•׳¡)
           if (msg.notifyName && msg.notifyName.trim()) {
             resolvedName = msg.notifyName.trim();
             this._logger.log(`[Status] Got name from message.notifyName: ${resolvedName}`);
@@ -117,13 +126,13 @@ export class AppService {
             contactAvatar = null;
           }
         } else {
-          // לא הצלחנו לחלץ id — נספק fallback כללי
+          // ׳׳ ׳”׳¦׳׳—׳ ׳• ׳׳—׳׳¥ id ג€” ׳ ׳¡׳₪׳§ fallback ׳›׳׳׳™
           contactId = null;
-          contactName = 'לא ידוע';
+          contactName = 'Unknown contact';
           contactAvatar = null;
         }
 
-        // עיבוד מדיה אם יש
+        // ׳¢׳™׳‘׳•׳“ ׳׳“׳™׳” ׳׳ ׳™׳©
         if (message.hasMedia) {
           await this.processMessageMediaInBackground(message);
         }
@@ -140,10 +149,16 @@ export class AppService {
           contactAvatar,
         };
 
-        // שמירה בזיכרון
+        const uniqueStatusId = `${statusItem.id}::${contactId || 'unknown'}::${statusItem.timestamp || 0}`;
+        if (this._statusIds.has(uniqueStatusId)) {
+          return;
+        }
+        this._statusIds.add(uniqueStatusId);
+
+        // ׳©׳׳™׳¨׳” ׳‘׳–׳™׳›׳¨׳•׳
         this._statuses.push(statusItem);
 
-        // שליחה ללקוח דרך סוקט
+        // ׳©׳׳™׳—׳” ׳׳׳§׳•׳— ׳“׳¨׳ ׳¡׳•׳§׳˜
         this.socketService.send('status-update', statusItem);
       }
     });
@@ -288,7 +303,7 @@ export class AppService {
     // NEW: Get collected statuses
     // =================================================================
     getCollectedStatuses() {
-      // מחזיר את כל הסטטוסים שנאספו
+      // ׳׳—׳–׳™׳¨ ׳׳× ׳›׳ ׳”׳¡׳˜׳˜׳•׳¡׳™׳ ׳©׳ ׳׳¡׳₪׳•
       return this._statuses;
     }
 
@@ -301,7 +316,7 @@ export class AppService {
       return;
     }
 
-    // אם יש כבר mediaUrl, נשתמש בו
+    // ׳׳ ׳™׳© ׳›׳‘׳¨ mediaUrl, ׳ ׳©׳×׳׳© ׳‘׳•
     if ((message as any).mediaUrl !== undefined) {
       this.socketService.send('media-ready', {
         messageId: message.id._serialized,
@@ -333,10 +348,10 @@ export class AppService {
         this._logger.log(`Media processed and saved: ${filePath}`);
       }
 
-      // עדכון ה-mediaUrl על ההודעה עצמה
+      // ׳¢׳“׳›׳•׳ ׳”-mediaUrl ׳¢׳ ׳”׳”׳•׳“׳¢׳” ׳¢׳¦׳׳”
       (message as any).mediaUrl = mediaUrl;
 
-      // ★ Critical step: Send the update to the client via WebSocket
+      // ג˜… Critical step: Send the update to the client via WebSocket
       // The name of the event is 'media-ready'
       this.socketService.send('media-ready', {
         messageId: message.id._serialized,
@@ -352,3 +367,7 @@ export class AppService {
     }
   }
 }
+
+
+
+
