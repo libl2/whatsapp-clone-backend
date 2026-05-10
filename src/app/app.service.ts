@@ -10,12 +10,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { SocketService } from '../socket/socket.service'; // Make sure the path is correct
 
+const { Message: WAWebJSMessage } = require('whatsapp-web.js');
+
 @Injectable()
 export class AppService {
   private _logger = new ConsoleLogger('AppService');
   private readonly MEDIA_SAVE_PATH = path.join(__dirname, '..', '..', 'media');
   private readonly BASE_URL = 'http://localhost:3100';
   private _statusIds = new Set<string>();
+  private _mediaReadySent = new Set<string>();
+  private _mediaProcessing = new Set<string>();
   private _statusListenerBound = false;
   private _statuses: any[] = []; // ׳©׳׳™׳¨׳× ׳¡׳˜׳˜׳•׳¡׳™׳ ׳‘׳–׳™׳›׳¨׳•׳
 
@@ -208,7 +212,12 @@ export class AppService {
 
   async getAvatar(id: string): Promise<string> {
     this.ensureClientReady('getAvatar');
-    return await this.waService.client.getProfilePicUrl(id);
+    try {
+      return await this.waService.client.getProfilePicUrl(id);
+    } catch (err) {
+      this._logger.warn(`getAvatar failed for ${id}: ${err?.message || err}`);
+      return null;
+    }
   }
 
   async getChats(): Promise<WAWebJS.Chat[]> {
@@ -216,11 +225,29 @@ export class AppService {
     return await this.waService.client.getChats();
   }
 
+  async getChat(id: string): Promise<WAWebJS.Chat> {
+    this.ensureClientReady('getChat');
+    return await this.waService.client.getChatById(id);
+  }
+
   async getMessages(id: string, model: any): Promise<WAWebJS.Message[]> {
     this.ensureClientReady('getMessages');
     try {
       const chat = await this.waService.client.getChatById(id);
-      const messages = await chat.fetchMessages(model);
+      let messages: WAWebJS.Message[];
+
+      try {
+        messages = await chat.fetchMessages(model);
+      } catch (err) {
+        if (!this.isRecoverableFetchMessagesError(err)) {
+          throw err;
+        }
+
+        this._logger.warn(
+          `fetchMessages failed for ${id}, using loaded-messages fallback: ${err?.message || err}`,
+        );
+        messages = await this.getLoadedMessagesFallback(id, model);
+      }
 
       // Run media processing in the background without waiting
       messages.forEach(message => {
@@ -230,11 +257,52 @@ export class AppService {
       });
 
       // Return messages immediately
-      return messages;
+      return await Promise.all(messages.map((message) => this.serializeMessage(message)));
     } catch (err) {
       this._logger.error(`Error fetching messages for chat ${id}: ${err.message}`);
       throw err;
     }
+  }
+
+  private isRecoverableFetchMessagesError(err: any): boolean {
+    const message = String(err?.message || err || '');
+    return (
+      message.includes('waitForChatLoading') ||
+      message.includes('Cannot read properties of undefined')
+    );
+  }
+
+  private async getLoadedMessagesFallback(id: string, model: any): Promise<WAWebJS.Message[]> {
+    const client = this.waService.client as any;
+    const rawMessages = await client.pupPage.evaluate(async (chatId, searchOptions) => {
+      const wwebjs = (window as any).WWebJS;
+
+      const msgFilter = (m) => {
+        if (m.isNotification || m.type === 'newsletter_notification') {
+          return false;
+        }
+        if (searchOptions && searchOptions.fromMe !== undefined && m.id.fromMe !== searchOptions.fromMe) {
+          return false;
+        }
+        return true;
+      };
+
+      const chat = await wwebjs.getChat(chatId, { getAsModel: false });
+      if (!chat?.msgs) {
+        return [];
+      }
+
+      let msgs = chat.msgs.getModelsArray().filter(msgFilter);
+      msgs.sort((a, b) => (a.t > b.t ? 1 : -1));
+
+      if (searchOptions && searchOptions.limit > 0 && msgs.length > searchOptions.limit) {
+        msgs = msgs.slice(msgs.length - searchOptions.limit);
+      }
+
+      return msgs.map(m => wwebjs.getMessageModel(m));
+    }, id, model);
+
+    return rawMessages.map((message: any) => new WAWebJSMessage(this.waService.client, message));
   }
   
   // =================================================================
@@ -255,7 +323,7 @@ export class AppService {
         }
       });
 
-      return messages;
+      return await Promise.all(messages.map((message) => this.serializeMessage(message)));
     } catch (err) {
       this._logger.error(`Error searching messages: ${err.message}`);
       throw err;
@@ -269,7 +337,8 @@ export class AppService {
     this.ensureClientReady('sendMessage');
     try {
       if (model.message) {
-        return await this.waService.client.sendMessage(id, model.message);
+        const message = await this.waService.client.sendMessage(id, model.message);
+        return (await this.serializeMessage(message)) as any;
       }
       throw new BadRequestException('Message content is missing in the model.');
     } catch (err) {
@@ -302,10 +371,146 @@ export class AppService {
     // =================================================================
     // NEW: Get collected statuses
     // =================================================================
-    getCollectedStatuses() {
+  getCollectedStatuses() {
       // ׳׳—׳–׳™׳¨ ׳׳× ׳›׳ ׳”׳¡׳˜׳˜׳•׳¡׳™׳ ׳©׳ ׳׳¡׳₪׳•
       return this._statuses;
     }
+
+  private async serializeQuotedMessage(message: any): Promise<any | null> {
+    const hasQuotedMsg = Boolean(message?.hasQuotedMsg ?? message?._data?.quotedMsg);
+    if (!hasQuotedMsg) {
+      return null;
+    }
+
+    try {
+      const quoted = typeof message?.getQuotedMessage === 'function'
+        ? await message.getQuotedMessage()
+        : null;
+
+      if (!quoted) {
+        return null;
+      }
+
+      const data = quoted?._data || {};
+      const body =
+        typeof quoted?.body === 'string'
+          ? quoted.body
+          : typeof data?.body === 'string'
+            ? data.body
+            : '';
+
+      return {
+        id: quoted?.id?._serialized || quoted?.id?.id || quoted?.id || null,
+        body,
+        type: quoted?.type || data?.type || 'chat',
+        from: quoted?.from || data?.from?._serialized || data?.from || null,
+        author: quoted?.author || data?.author?._serialized || data?.author || null,
+        fromMe: Boolean(quoted?.fromMe ?? data?.id?.fromMe),
+        hasMedia: Boolean(quoted?.hasMedia),
+        notifyName:
+          typeof quoted?.notifyName === 'string'
+            ? quoted.notifyName
+            : typeof data?.notifyName === 'string'
+              ? data.notifyName
+              : null,
+        _data: {
+          notifyName: typeof data?.notifyName === 'string' ? data.notifyName : null,
+          author: data?.author?._serialized || data?.author || null,
+          sender: {
+            name:
+              typeof data?.senderObj?.name === 'string'
+                ? data.senderObj.name
+                : typeof data?.sender?.name === 'string'
+                  ? data.sender.name
+                  : null,
+            pushname:
+              typeof data?.senderObj?.pushname === 'string'
+                ? data.senderObj.pushname
+                : typeof data?.sender?.pushname === 'string'
+                  ? data.sender.pushname
+                  : null,
+          },
+        },
+      };
+    } catch (err) {
+      this._logger.warn(`Failed to load quoted message: ${err?.message || err}`);
+      return null;
+    }
+  }
+
+  private async serializeMessage(message: any): Promise<any> {
+    const data = message?._data || {};
+    const rawBody =
+      typeof message?.body === 'string'
+        ? message.body
+        : typeof data?.body === 'string'
+          ? data.body
+          : '';
+    const caption =
+      typeof data?.caption === 'string'
+        ? data.caption
+        : typeof message?.caption === 'string'
+          ? message.caption
+          : '';
+
+    let body = caption || rawBody;
+    if (message?.hasMedia && this.looksLikeEncodedPayload(body)) {
+      body = caption || '';
+    }
+
+    const quotedMessage = await this.serializeQuotedMessage(message);
+
+    return {
+      id: message?.id,
+      ack: message?.ack,
+      hasMedia: Boolean(message?.hasMedia),
+      body: typeof body === 'string' ? body : '',
+      type: message?.type || data?.type || 'chat',
+      timestamp: Number(message?.timestamp || data?.t || 0),
+      from: message?.from || data?.from?._serialized || data?.from || null,
+      to: message?.to || data?.to?._serialized || data?.to || null,
+      author: message?.author || data?.author?._serialized || data?.author || null,
+      fromMe: Boolean(message?.fromMe ?? data?.id?.fromMe),
+      notifyName:
+        typeof message?.notifyName === 'string'
+          ? message.notifyName
+          : typeof data?.notifyName === 'string'
+            ? data.notifyName
+            : null,
+      mediaUrl: (message as any)?.mediaUrl ?? null,
+      mimetype: data?.mimetype || null,
+      filename: data?.filename || null,
+      duration: message?.duration ?? data?.duration ?? null,
+      quotedMessage,
+      _data: {
+        notifyName: typeof data?.notifyName === 'string' ? data.notifyName : null,
+        author: data?.author?._serialized || data?.author || null,
+        sender: {
+          name:
+            typeof data?.senderObj?.name === 'string'
+              ? data.senderObj.name
+              : typeof data?.sender?.name === 'string'
+                ? data.sender.name
+                : null,
+          pushname:
+            typeof data?.senderObj?.pushname === 'string'
+              ? data.senderObj.pushname
+              : typeof data?.sender?.pushname === 'string'
+                ? data.sender.pushname
+                : null,
+        },
+      },
+    };
+  }
+
+  private looksLikeEncodedPayload(value: string): boolean {
+    if (!value || typeof value !== 'string') {
+      return false;
+    }
+
+    const compact = value.replace(/\s+/g, '');
+    return compact.length > 120 && /^[A-Za-z0-9+/=_-]+$/.test(compact);
+  }
 
   /**
    * This function runs independently in the background.
@@ -316,14 +521,26 @@ export class AppService {
       return;
     }
 
+    const serializedId = message.id?._serialized;
+    if (!serializedId) {
+      return;
+    }
+
+    if (this._mediaReadySent.has(serializedId) || this._mediaProcessing.has(serializedId)) {
+      return;
+    }
+
     // ׳׳ ׳™׳© ׳›׳‘׳¨ mediaUrl, ׳ ׳©׳×׳׳© ׳‘׳•
     if ((message as any).mediaUrl !== undefined) {
+      this._mediaReadySent.add(serializedId);
       this.socketService.send('media-ready', {
-        messageId: message.id._serialized,
+        messageId: serializedId,
         mediaUrl: (message as any).mediaUrl,
       });
       return;
     }
+
+    this._mediaProcessing.add(serializedId);
 
     try {
       const media = await message.downloadMedia();
@@ -350,11 +567,12 @@ export class AppService {
 
       // ׳¢׳“׳›׳•׳ ׳”-mediaUrl ׳¢׳ ׳”׳”׳•׳“׳¢׳” ׳¢׳¦׳׳”
       (message as any).mediaUrl = mediaUrl;
+      this._mediaReadySent.add(serializedId);
 
       // ג˜… Critical step: Send the update to the client via WebSocket
       // The name of the event is 'media-ready'
       this.socketService.send('media-ready', {
-        messageId: message.id._serialized,
+        messageId: serializedId,
         mediaUrl: mediaUrl,
       });
 
@@ -364,6 +582,8 @@ export class AppService {
       this.socketService.send('media-error', {
         messageId: message.id._serialized,
       });
+    } finally {
+      this._mediaProcessing.delete(serializedId);
     }
   }
 }

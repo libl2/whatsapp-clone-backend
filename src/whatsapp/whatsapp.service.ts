@@ -90,6 +90,127 @@ export class WhatsAppService {
     }
   }
 
+  private async serializeQuotedMessage(message: any): Promise<any | null> {
+    const hasQuotedMsg = Boolean(message?.hasQuotedMsg ?? message?._data?.quotedMsg);
+    if (!hasQuotedMsg) {
+      return null;
+    }
+
+    try {
+      const quoted = typeof message?.getQuotedMessage === 'function'
+        ? await message.getQuotedMessage()
+        : null;
+
+      if (!quoted) {
+        return null;
+      }
+
+      const data = quoted?._data || {};
+      const body =
+        typeof quoted?.body === 'string'
+          ? quoted.body
+          : typeof data?.body === 'string'
+            ? data.body
+            : '';
+
+      return {
+        id: quoted?.id?._serialized || quoted?.id?.id || quoted?.id || null,
+        body,
+        type: quoted?.type || data?.type || 'chat',
+        from: quoted?.from || data?.from?._serialized || data?.from || null,
+        author: quoted?.author || data?.author?._serialized || data?.author || null,
+        fromMe: Boolean(quoted?.fromMe ?? data?.id?.fromMe),
+        hasMedia: Boolean(quoted?.hasMedia),
+        notifyName:
+          typeof quoted?.notifyName === 'string'
+            ? quoted.notifyName
+            : typeof data?.notifyName === 'string'
+              ? data.notifyName
+              : null,
+        _data: {
+          notifyName: typeof data?.notifyName === 'string' ? data.notifyName : null,
+          author: data?.author?._serialized || data?.author || null,
+          sender: {
+            name:
+              typeof data?.senderObj?.name === 'string'
+                ? data.senderObj.name
+                : typeof data?.sender?.name === 'string'
+                  ? data.sender.name
+                  : null,
+            pushname:
+              typeof data?.senderObj?.pushname === 'string'
+                ? data.senderObj.pushname
+                : typeof data?.sender?.pushname === 'string'
+                  ? data.sender.pushname
+                  : null,
+          },
+        },
+      };
+    } catch (err) {
+      this._logger.warn(`Failed to load quoted message: ${err?.message || err}`);
+      return null;
+    }
+  }
+
+  private async serializeRealtimeMessage(message: any): Promise<any> {
+    const data = message?._data || {};
+    const rawBody =
+      typeof message?.body === 'string'
+        ? message.body
+        : typeof data?.body === 'string'
+          ? data.body
+          : '';
+    const caption = typeof data?.caption === 'string' ? data.caption : '';
+    const compactBody = (caption || rawBody || '').replace(/\s+/g, '');
+    const body =
+      message?.hasMedia && compactBody.length > 120 && /^[A-Za-z0-9+/=_-]+$/.test(compactBody)
+        ? caption || ''
+        : caption || rawBody;
+    const quotedMessage = await this.serializeQuotedMessage(message);
+
+    return {
+      id: message?.id,
+      ack: message?.ack,
+      hasMedia: Boolean(message?.hasMedia),
+      body: typeof body === 'string' ? body : '',
+      type: message?.type || data?.type || 'chat',
+      timestamp: Number(message?.timestamp || data?.t || 0),
+      from: message?.from || data?.from?._serialized || data?.from || null,
+      to: message?.to || data?.to?._serialized || data?.to || null,
+      author: message?.author || data?.author?._serialized || data?.author || null,
+      fromMe: Boolean(message?.fromMe ?? data?.id?.fromMe),
+      notifyName:
+        typeof message?.notifyName === 'string'
+          ? message.notifyName
+          : typeof data?.notifyName === 'string'
+            ? data.notifyName
+            : null,
+      mediaUrl: (message as any)?.mediaUrl ?? null,
+      mimetype: data?.mimetype || null,
+      filename: data?.filename || null,
+      duration: message?.duration ?? data?.duration ?? null,
+      quotedMessage,
+      _data: {
+        notifyName: typeof data?.notifyName === 'string' ? data.notifyName : null,
+        author: data?.author?._serialized || data?.author || null,
+        sender: {
+          name:
+            typeof data?.senderObj?.name === 'string'
+              ? data.senderObj.name
+              : typeof data?.sender?.name === 'string'
+                ? data.sender.name
+                : null,
+          pushname:
+            typeof data?.senderObj?.pushname === 'string'
+              ? data.senderObj.pushname
+              : typeof data?.sender?.pushname === 'string'
+                ? data.sender.pushname
+                : null,
+        },
+      },
+    };
+  }
+
   private onQR = async (qr: string) => {
     this.status = 'qr';
     this._qrCode = await toDataURL(qr);
@@ -119,8 +240,8 @@ export class WhatsAppService {
     this.socketService.send('loading', { percent, msg });
     this._logger.log(`Client is loading: ${percent}; ${msg}`);
   };
-  private onMessage = (msg) => {
-    this.socketService.send('message', { msg });
+  private onMessage = async (msg) => {
+    this.socketService.send('message', { msg: await this.serializeRealtimeMessage(msg) });
     this._logger.log(`Message has been recived: ${msg}`, msg);
   };
   private onMessageCreate = (msg) => {

@@ -34,6 +34,11 @@ export class AppController {
     return this.appService.getMessages(id, model);
   }
 
+  @Get('chat/:id')
+  getChat(@Param('id') id: string) {
+    return this.appService.getChat(id);
+  }
+
   @Post('chat/:id/search')
   searchMessages(@Param('id') id: string, @Body() model: any) {
     model.chatId = id;
