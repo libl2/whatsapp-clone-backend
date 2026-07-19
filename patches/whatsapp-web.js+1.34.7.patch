@@ -1,0 +1,317 @@
+diff --git a/node_modules/whatsapp-web.js/index.d.ts b/node_modules/whatsapp-web.js/index.d.ts
+index 13051ee..8c0f1aa 100644
+--- a/node_modules/whatsapp-web.js/index.d.ts
++++ b/node_modules/whatsapp-web.js/index.d.ts
+@@ -97,13 +97,13 @@ declare namespace WAWebJS {
+         getBlockedContacts(): Promise<Contact[]>;
+ 
+         /** Gets chat or channel instance by ID */
+-        getChatById(chatId: string): Promise<Chat>;
++        getChatById(chatId: string, options?: { skipMetadata?: boolean }): Promise<Chat>;
+ 
+         /** Gets a {@link Channel} instance by invite code */
+         getChannelByInviteCode(inviteCode: string): Promise<Channel>;
+ 
+         /** Get all current chat instances */
+-        getChats(): Promise<Chat[]>;
++        getChats(options?: { skipMetadata?: boolean }): Promise<Chat[]>;
+ 
+         /** Gets all cached {@link Channel} instances */
+         getChannels(): Promise<Channel[]>;
+diff --git a/node_modules/whatsapp-web.js/src/Client.js b/node_modules/whatsapp-web.js/src/Client.js
+index 800109e..98b9452 100644
+--- a/node_modules/whatsapp-web.js/src/Client.js
++++ b/node_modules/whatsapp-web.js/src/Client.js
+@@ -1665,10 +1665,10 @@ class Client extends EventEmitter {
+      * Get all current chat instances
+      * @returns {Promise<Array<Chat>>}
+      */
+-    async getChats() {
+-        const chats = await this.pupPage.evaluate(async () => {
+-            return await window.WWebJS.getChats();
+-        });
++    async getChats({ skipMetadata = false } = {}) {
++        const chats = await this.pupPage.evaluate(async (skipMetadata) => {
++            return await window.WWebJS.getChats({ skipMetadata });
++        }, skipMetadata);
+ 
+         return chats.map((chat) => ChatFactory.create(this, chat));
+     }
+@@ -1690,10 +1690,10 @@ class Client extends EventEmitter {
+      * @param {string} chatId
+      * @returns {Promise<Chat|Channel>}
+      */
+-    async getChatById(chatId) {
+-        const chat = await this.pupPage.evaluate(async (chatId) => {
+-            return await window.WWebJS.getChat(chatId);
+-        }, chatId);
++    async getChatById(chatId, { skipMetadata = false } = {}) {
++        const chat = await this.pupPage.evaluate(async (chatId, skipMetadata) => {
++            return await window.WWebJS.getChat(chatId, { skipMetadata });
++        }, chatId, skipMetadata);
+         return chat ? ChatFactory.create(this, chat) : undefined;
+     }
+ 
+diff --git a/node_modules/whatsapp-web.js/src/structures/Message.js b/node_modules/whatsapp-web.js/src/structures/Message.js
+index dd977e8..0431a9f 100644
+--- a/node_modules/whatsapp-web.js/src/structures/Message.js
++++ b/node_modules/whatsapp-web.js/src/structures/Message.js
+@@ -432,20 +432,26 @@ class Message extends Base {
+         if (!this.hasQuotedMsg) return undefined;
+ 
+         const quotedMsg = await this.client.pupPage.evaluate(async (msgId) => {
+-            const msg =
+-                window.require('WAWebCollections').Msg.get(msgId) ||
+-                (
+-                    await window
+-                        .require('WAWebCollections')
+-                        .Msg.getMessagesById([msgId])
+-                )?.messages?.[0];
+-            const quotedMsg = window
+-                .require('WAWebQuotedMsgModelUtils')
+-                .getQuotedMsgObj(msg);
+-            return window.WWebJS.getMessageModel(quotedMsg);
++            try {
++                const msg =
++                    window.require('WAWebCollections').Msg.get(msgId) ||
++                    (
++                        await window
++                            .require('WAWebCollections')
++                            .Msg.getMessagesById([msgId])
++                    )?.messages?.[0];
++                const quotedMsg = window
++                    .require('WAWebQuotedMsgModelUtils')
++                    .getQuotedMsgObj(msg);
++                return window.WWebJS.getMessageModel(quotedMsg);
++            } catch (e) {
++                // resolving the quoted message can fail for LID-only senders;
++                // fail fast in-page instead of throwing across the CDP bridge
++                return null;
++            }
+         }, this.id._serialized);
+ 
+-        return new Message(this.client, quotedMsg);
++        return quotedMsg ? new Message(this.client, quotedMsg) : undefined;
+     }
+ 
+     /**
+diff --git a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
+index 540078a..da06d76 100644
+--- a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
++++ b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
+@@ -839,7 +839,7 @@ exports.LoadUtils = () => {
+         return msg;
+     };
+ 
+-    window.WWebJS.getChat = async (chatId, { getAsModel = true } = {}) => {
++    window.WWebJS.getChat = async (chatId, { getAsModel = true, skipMetadata = false } = {}) => {
+         const isChannel = /@\w*newsletter\b/.test(chatId);
+         const chatWid = window.require('WAWebWidFactory').createWid(chatId);
+         let chat;
+@@ -861,17 +861,22 @@ exports.LoadUtils = () => {
+                 chat = null;
+             }
+         } else {
+-            chat =
+-                window.require('WAWebCollections').Chat.get(chatWid) ||
+-                (
+-                    await window
+-                        .require('WAWebFindChatAction')
+-                        .findOrCreateLatestChat(chatWid)
+-                )?.chat;
++            chat = window.require('WAWebCollections').Chat.get(chatWid);
++            if (!chat) {
++                try {
++                    chat = (
++                        await window
++                            .require('WAWebFindChatAction')
++                            .findOrCreateLatestChat(chatWid)
++                    )?.chat;
++                } catch (ignoredError) {
++                    chat = null;
++                }
++            }
+         }
+ 
+         return getAsModel && chat
+-            ? await window.WWebJS.getChatModel(chat, { isChannel: isChannel })
++            ? await window.WWebJS.getChatModel(chat, { isChannel: isChannel, skipMetadata })
+             : chat;
+     };
+ 
+@@ -917,12 +922,12 @@ exports.LoadUtils = () => {
+         };
+     };
+ 
+-    window.WWebJS.getChats = async () => {
++    window.WWebJS.getChats = async ({ skipMetadata = false } = {}) => {
+         const chats = window.require('WAWebCollections').Chat.getModelsArray();
+         const chatPromises = chats.map((chat) =>
+-            window.WWebJS.getChatModel(chat),
++            window.WWebJS.getChatModel(chat, { skipMetadata }).catch(() => null),
+         );
+-        return await Promise.all(chatPromises);
++        return (await Promise.all(chatPromises)).filter(Boolean);
+     };
+ 
+     window.WWebJS.getChannels = async () => {
+@@ -930,14 +935,39 @@ exports.LoadUtils = () => {
+             .require('WAWebCollections')
+             .WAWebNewsletterCollection.getModelsArray();
+         const channelPromises = channels?.map((channel) =>
+-            window.WWebJS.getChatModel(channel, { isChannel: true }),
++            window.WWebJS.getChatModel(channel, { isChannel: true }).catch(() => null),
+         );
+-        return await Promise.all(channelPromises);
++        return (await Promise.all(channelPromises)).filter(Boolean);
+     };
+ 
+-    window.WWebJS.getChatModel = async (chat, { isChannel = false } = {}) => {
++    window.WWebJS.getChatModel = async (chat, { isChannel = false, skipMetadata = false } = {}) => {
+         if (!chat) return null;
+ 
++        try {
++            return await window.WWebJS._getChatModelInner(chat, { isChannel, skipMetadata });
++        } catch (e) {
++            try {
++                // last-resort fallback: a minimal model so one broken chat
++                // doesn't take down the whole batch/request
++                const fallback = chat.serialize();
++                fallback.isGroup = Boolean(chat.groupMetadata);
++                fallback.lastMessage = null;
++                try {
++                    fallback.formattedTitle = chat.formattedTitle;
++                } catch (e3) {
++                    // ignore; keep whatever serialize() produced
++                }
++                delete fallback.msgs;
++                delete fallback.msgUnsyncedButtonReplyMsgs;
++                delete fallback.unsyncedButtonReplies;
++                return fallback;
++            } catch (e2) {
++                return null;
++            }
++        }
++    };
++
++    window.WWebJS._getChatModelInner = async (chat, { isChannel = false, skipMetadata = false } = {}) => {
+         const model = chat.serialize();
+         model.isGroup = false;
+         model.isMuted = chat.mute?.expiration !== 0;
+@@ -951,51 +981,82 @@ exports.LoadUtils = () => {
+ 
+         if (chat.groupMetadata) {
+             model.isGroup = true;
+-            const chatWid = window
+-                .require('WAWebWidFactory')
+-                .createWid(chat.id._serialized);
+-            const groupMetadata =
+-                window.require('WAWebCollections').GroupMetadata ||
+-                window.require('WAWebCollections').WAWebGroupMetadataCollection;
+-            await groupMetadata.update(chatWid);
+-            const { toPn } = window.require('WAWebLidMigrationUtils');
+-            const serializedMetadata = chat.groupMetadata.serialize();
+-            for (const p of serializedMetadata.participants || []) {
+-                p.id = toPn(p.id) ?? p.id;
++            if (skipMetadata) {
++                // caller only needs a chat handle (e.g. to fetch/send messages);
++                // skip the network round-trip to refresh the full participant list
++                // and use whatever is already cached on the chat model
++                try {
++                    model.groupMetadata = chat.groupMetadata.serialize();
++                    model.isReadOnly = chat.groupMetadata.announce;
++                } catch (e) {
++                    // no cached metadata available yet; keep the base chat model
++                }
++            } else {
++                try {
++                    const chatWid = window
++                        .require('WAWebWidFactory')
++                        .createWid(chat.id._serialized);
++                    const groupMetadata =
++                        window.require('WAWebCollections').GroupMetadata ||
++                        window.require('WAWebCollections').WAWebGroupMetadataCollection;
++                    await groupMetadata.update(chatWid);
++                    const { toPn } = window.require('WAWebLidMigrationUtils');
++                    const serializedMetadata = chat.groupMetadata.serialize();
++                    for (const p of serializedMetadata.participants || []) {
++                        try {
++                            p.id = toPn(p.id) ?? p.id;
++                        } catch (e) {
++                            // keep the original (possibly @lid) id if conversion fails
++                        }
++                    }
++                    model.groupMetadata = serializedMetadata;
++                    model.isReadOnly = chat.groupMetadata.announce;
++                } catch (e) {
++                    // group metadata enrichment failed (e.g. LID-only participants); keep the base chat model
++                }
+             }
+-            model.groupMetadata = serializedMetadata;
+-            model.isReadOnly = chat.groupMetadata.announce;
+         }
+ 
+         if (chat.newsletterMetadata) {
+-            const newsletterMetadata =
+-                window.require('WAWebCollections')
+-                    .NewsletterMetadataCollection ||
+-                window.require('WAWebCollections')
+-                    .WAWebNewsletterMetadataCollection;
+-            await newsletterMetadata.update(chat.id);
++          try {
++            if (!skipMetadata) {
++                const newsletterMetadata =
++                    window.require('WAWebCollections')
++                        .NewsletterMetadataCollection ||
++                    window.require('WAWebCollections')
++                        .WAWebNewsletterMetadataCollection;
++                await newsletterMetadata.update(chat.id);
++            }
+             model.channelMetadata = chat.newsletterMetadata.serialize();
+             model.channelMetadata.createdAtTs =
+                 chat.newsletterMetadata.creationTime;
++          } catch (e) {
++            // newsletter/channel metadata enrichment failed; keep the base chat model
++          }
+         }
+ 
+         model.lastMessage = null;
+-        if (model.msgs && model.msgs.length) {
+-            const lastMessage = chat.lastReceivedKey
+-                ? window
+-                      .require('WAWebCollections')
+-                      .Msg.get(chat.lastReceivedKey._serialized) ||
+-                  (
+-                      await window
++        try {
++            if (model.msgs && model.msgs.length) {
++                const lastMessage = chat.lastReceivedKey
++                    ? window
+                           .require('WAWebCollections')
+-                          .Msg.getMessagesById([
+-                              chat.lastReceivedKey._serialized,
+-                          ])
+-                  )?.messages?.[0]
+-                : null;
+-            lastMessage &&
+-                (model.lastMessage =
+-                    window.WWebJS.getMessageModel(lastMessage));
++                          .Msg.get(chat.lastReceivedKey._serialized) ||
++                      (
++                          await window
++                              .require('WAWebCollections')
++                              .Msg.getMessagesById([
++                                  chat.lastReceivedKey._serialized,
++                              ])
++                      )?.messages?.[0]
++                    : null;
++                lastMessage &&
++                    (model.lastMessage =
++                        window.WWebJS.getMessageModel(lastMessage));
++            }
++        } catch (e) {
++            // last-message enrichment failed; keep the rest of the chat model intact
++            model.lastMessage = null;
+         }
+ 
+         delete model.msgs;

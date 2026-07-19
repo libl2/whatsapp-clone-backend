@@ -222,7 +222,7 @@ export class AppService {
 
   async getChats(): Promise<WAWebJS.Chat[]> {
     this.ensureClientReady('getChats');
-    return await this.waService.client.getChats();
+    return await this.waService.client.getChats({ skipMetadata: true });
   }
 
   async getChat(id: string): Promise<WAWebJS.Chat> {
@@ -233,7 +233,7 @@ export class AppService {
   async getMessages(id: string, model: any): Promise<WAWebJS.Message[]> {
     this.ensureClientReady('getMessages');
     try {
-      const chat = await this.waService.client.getChatById(id);
+      const chat = await this.waService.client.getChatById(id, { skipMetadata: true });
       let messages: WAWebJS.Message[];
 
       try {
@@ -350,7 +350,7 @@ export class AppService {
   async markChatAsRead(id: string): Promise<{ success: boolean }> {
     this.ensureClientReady('markChatAsRead');
     try {
-      const chat = await this.waService.client.getChatById(id);
+      const chat = await this.waService.client.getChatById(id, { skipMetadata: true });
       await chat.sendSeen();
       return { success: true };
     } catch (err) {
