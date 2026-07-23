@@ -53,7 +53,7 @@ index 800109e..98b9452 100644
      }
  
 diff --git a/node_modules/whatsapp-web.js/src/structures/Message.js b/node_modules/whatsapp-web.js/src/structures/Message.js
-index dd977e8..0431a9f 100644
+index dd977e8..9b350d0 100644
 --- a/node_modules/whatsapp-web.js/src/structures/Message.js
 +++ b/node_modules/whatsapp-web.js/src/structures/Message.js
 @@ -432,20 +432,26 @@ class Message extends Base {
@@ -95,11 +95,113 @@ index dd977e8..0431a9f 100644
      }
  
      /**
+@@ -516,6 +522,14 @@ class Message extends Base {
+         }
+ 
+         const result = await this.client.pupPage.evaluate(async (msgId) => {
++            const withTimeout = (promise, ms) =>
++                Promise.race([
++                    promise,
++                    new Promise((_, reject) =>
++                        setTimeout(() => reject(new Error('media resolve timed out')), ms),
++                    ),
++                ]);
++
+             const msg =
+                 window.require('WAWebCollections').Msg.get(msgId) ||
+                 (
+@@ -533,11 +547,18 @@ class Message extends Base {
+                 return null;
+             }
+             if (msg.mediaData.mediaStage != 'RESOLVED') {
+-                // try to resolve media
+-                await msg.downloadMedia({
+-                    downloadEvenIfExpensive: true,
+-                    rmrReason: 1,
+-                });
++                // try to resolve media; some senders (e.g. LID-addressed) can hang here indefinitely
++                try {
++                    await withTimeout(
++                        msg.downloadMedia({
++                            downloadEvenIfExpensive: true,
++                            rmrReason: 1,
++                        }),
++                        20000,
++                    );
++                } catch (e) {
++                    return undefined;
++                }
+             }
+ 
+             if (
+@@ -557,18 +578,21 @@ class Message extends Base {
+                         return this;
+                     },
+                 };
+-                const decryptedMedia = await window
+-                    .require('WAWebDownloadManager')
+-                    .downloadManager.downloadAndMaybeDecrypt({
+-                        directPath: msg.directPath,
+-                        encFilehash: msg.encFilehash,
+-                        filehash: msg.filehash,
+-                        mediaKey: msg.mediaKey,
+-                        mediaKeyTimestamp: msg.mediaKeyTimestamp,
+-                        type: msg.type,
+-                        signal: new AbortController().signal,
+-                        downloadQpl: mockQpl,
+-                    });
++                const decryptedMedia = await withTimeout(
++                    window
++                        .require('WAWebDownloadManager')
++                        .downloadManager.downloadAndMaybeDecrypt({
++                            directPath: msg.directPath,
++                            encFilehash: msg.encFilehash,
++                            filehash: msg.filehash,
++                            mediaKey: msg.mediaKey,
++                            mediaKeyTimestamp: msg.mediaKeyTimestamp,
++                            type: msg.type,
++                            signal: new AbortController().signal,
++                            downloadQpl: mockQpl,
++                        }),
++                    20000,
++                );
+ 
+                 const data =
+                     await window.WWebJS.arrayBufferToBase64Async(
+@@ -582,8 +606,9 @@ class Message extends Base {
+                     filesize: msg.size,
+                 };
+             } catch (e) {
+-                if (e.status && e.status === 404) return undefined;
+-                throw e;
++                // fail fast/clean in-page (e.g. 404, or resolve timeout) instead of
++                // throwing across the CDP bridge and leaving the caller hanging
++                return undefined;
+             }
+         }, this.id._serialized);
+ 
 diff --git a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
-index 540078a..da06d76 100644
+index 540078a..7307070 100644
 --- a/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
 +++ b/node_modules/whatsapp-web.js/src/util/Injected/Utils.js
-@@ -839,7 +839,7 @@ exports.LoadUtils = () => {
+@@ -834,12 +834,24 @@ exports.LoadUtils = () => {
+             });
+         }
+ 
++        if (!msg.id._serialized) {
++            // some LID-addressed messages serialize with the _serialized getter
++            // renamed (e.g. to "$1") instead of missing outright; prefer that,
++            // otherwise reconstruct the standard serialized id format
++            const fallbackSerialized =
++                msg.id.$1 ||
++                `${msg.id.fromMe}_${msg.id.remote}_${msg.id.id}${
++                    msg.id.participant?._serialized ? `_${msg.id.participant._serialized}` : ''
++                }`;
++            msg.id = Object.assign({}, msg.id, { _serialized: fallbackSerialized });
++        }
++
+         delete msg.pendingAckUpdate;
+ 
          return msg;
      };
  
@@ -108,7 +210,7 @@ index 540078a..da06d76 100644
          const isChannel = /@\w*newsletter\b/.test(chatId);
          const chatWid = window.require('WAWebWidFactory').createWid(chatId);
          let chat;
-@@ -861,17 +861,22 @@ exports.LoadUtils = () => {
+@@ -861,17 +873,22 @@ exports.LoadUtils = () => {
                  chat = null;
              }
          } else {
@@ -139,7 +241,7 @@ index 540078a..da06d76 100644
              : chat;
      };
  
-@@ -917,12 +922,12 @@ exports.LoadUtils = () => {
+@@ -917,12 +934,12 @@ exports.LoadUtils = () => {
          };
      };
  
@@ -155,7 +257,7 @@ index 540078a..da06d76 100644
      };
  
      window.WWebJS.getChannels = async () => {
-@@ -930,14 +935,39 @@ exports.LoadUtils = () => {
+@@ -930,14 +947,39 @@ exports.LoadUtils = () => {
              .require('WAWebCollections')
              .WAWebNewsletterCollection.getModelsArray();
          const channelPromises = channels?.map((channel) =>
@@ -198,7 +300,7 @@ index 540078a..da06d76 100644
          const model = chat.serialize();
          model.isGroup = false;
          model.isMuted = chat.mute?.expiration !== 0;
-@@ -951,51 +981,82 @@ exports.LoadUtils = () => {
+@@ -951,51 +993,82 @@ exports.LoadUtils = () => {
  
          if (chat.groupMetadata) {
              model.isGroup = true;

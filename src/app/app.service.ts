@@ -18,7 +18,7 @@ export class AppService {
   private readonly MEDIA_SAVE_PATH = path.join(__dirname, '..', '..', 'media');
   private readonly BASE_URL = 'http://localhost:3100';
   private _statusIds = new Set<string>();
-  private _mediaReadySent = new Set<string>();
+  private _mediaUrlCache = new Map<string, string>();
   private _mediaProcessing = new Set<string>();
   private _statusListenerBound = false;
   private _statuses: any[] = []; // ׳©׳׳™׳¨׳× ׳¡׳˜׳˜׳•׳¡׳™׳ ׳‘׳–׳™׳›׳¨׳•׳
@@ -523,16 +523,28 @@ export class AppService {
 
     const serializedId = message.id?._serialized;
     if (!serializedId) {
+      this._logger.warn(`processMessageMediaInBackground: message has no serialized id, skipping media download (type=${message.type})`);
       return;
     }
 
-    if (this._mediaReadySent.has(serializedId) || this._mediaProcessing.has(serializedId)) {
+    const cachedUrl = this._mediaUrlCache.get(serializedId);
+    if (cachedUrl) {
+      // already downloaded earlier in this process's lifetime; re-notify this
+      // (likely newly-mounted) listener instead of silently doing nothing
+      this.socketService.send('media-ready', {
+        messageId: serializedId,
+        mediaUrl: cachedUrl,
+      });
+      return;
+    }
+
+    if (this._mediaProcessing.has(serializedId)) {
       return;
     }
 
     // ׳׳ ׳™׳© ׳›׳‘׳¨ mediaUrl, ׳ ׳©׳×׳׳© ׳‘׳•
     if ((message as any).mediaUrl !== undefined) {
-      this._mediaReadySent.add(serializedId);
+      this._mediaUrlCache.set(serializedId, (message as any).mediaUrl);
       this.socketService.send('media-ready', {
         messageId: serializedId,
         mediaUrl: (message as any).mediaUrl,
@@ -540,10 +552,23 @@ export class AppService {
       return;
     }
 
+    const chatId = message.fromMe ? message.to : message.from;
+    const chatName = chatId.replace(/[^a-zA-Z0-9]/g, '_');
+    const chatFolderPath = path.join(this.MEDIA_SAVE_PATH, chatName);
+    const existingFile = this.findExistingMediaFile(chatFolderPath, message.timestamp, message.id.id);
+    if (existingFile) {
+      // already downloaded in a previous run of the backend; the in-memory
+      // cache was empty (e.g. after a restart) but the file is already on disk
+      const mediaUrl = `${this.BASE_URL}/media/${chatName}/${existingFile}`;
+      this._mediaUrlCache.set(serializedId, mediaUrl);
+      this.socketService.send('media-ready', { messageId: serializedId, mediaUrl });
+      return;
+    }
+
     this._mediaProcessing.add(serializedId);
 
     try {
-      const media = await message.downloadMedia();
+      const media = await this.downloadMediaWithRetries(message, serializedId);
 
       if (!media || !media.data) {
         throw new Error('Media data is missing');
@@ -551,9 +576,6 @@ export class AppService {
 
       const fileExtension = media.mimetype.split('/')[1] || 'bin';
       const filename = `${message.timestamp}_${message.id.id}.${fileExtension}`;
-      const chatId = message.fromMe ? message.to : message.from;
-      const chatName = chatId.replace(/[^a-zA-Z0-9]/g, '_');
-      const chatFolderPath = path.join(this.MEDIA_SAVE_PATH, chatName);
       const filePath = path.join(chatFolderPath, filename);
       const mediaUrl = `${this.BASE_URL}/media/${chatName}/${filename}`;
 
@@ -567,7 +589,7 @@ export class AppService {
 
       // ׳¢׳“׳›׳•׳ ׳”-mediaUrl ׳¢׳ ׳”׳”׳•׳“׳¢׳” ׳¢׳¦׳׳”
       (message as any).mediaUrl = mediaUrl;
-      this._mediaReadySent.add(serializedId);
+      this._mediaUrlCache.set(serializedId, mediaUrl);
 
       // ג˜… Critical step: Send the update to the client via WebSocket
       // The name of the event is 'media-ready'
@@ -585,6 +607,44 @@ export class AppService {
     } finally {
       this._mediaProcessing.delete(serializedId);
     }
+  }
+
+  private findExistingMediaFile(chatFolderPath: string, timestamp: number, messageId: string): string | null {
+    if (!fs.existsSync(chatFolderPath)) {
+      return null;
+    }
+    const prefix = `${timestamp}_${messageId}.`;
+    const match = fs.readdirSync(chatFolderPath).find((name) => name.startsWith(prefix));
+    return match || null;
+  }
+
+  // Video (and sometimes large image) media can still be resolving on WhatsApp's
+  // side right after it arrives; a single attempt often fails even though a
+  // retry a few seconds later succeeds. Retry a few times before giving up.
+  private async downloadMediaWithRetries(message: WAWebJS.Message, serializedId: string): Promise<any> {
+    const delaysMs = [5000, 15000];
+    let lastErr: any;
+
+    for (let attempt = 0; attempt <= delaysMs.length; attempt++) {
+      try {
+        const media = await message.downloadMedia();
+        if (media && media.data) {
+          return media;
+        }
+        lastErr = new Error('Media data is missing');
+      } catch (err) {
+        lastErr = err;
+      }
+
+      if (attempt < delaysMs.length) {
+        this._logger.warn(
+          `downloadMedia attempt ${attempt + 1} failed for ${serializedId}, retrying in ${delaysMs[attempt]}ms: ${lastErr?.message || lastErr}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delaysMs[attempt]));
+      }
+    }
+
+    throw lastErr;
   }
 }
 
